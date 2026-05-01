@@ -1,0 +1,29 @@
+[project]
+name = "pv_optimizer"
+version = "0.1.0"
+description = "Home Assistant integration that minimises electricity cost for a PV+battery system using linear programming."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Ondrej Cermak" }]
+dependencies = [
+    "pulp>=2.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["custom_components/pv_optimizer"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

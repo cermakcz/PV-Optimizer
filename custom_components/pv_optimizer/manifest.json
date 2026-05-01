@@ -1,0 +1,12 @@
+{
+  "domain": "pv_optimizer",
+  "name": "PV Optimizer",
+  "version": "0.1.0",
+  "documentation": "https://github.com/ocermak/pvlp-controller",
+  "issue_tracker": "https://github.com/ocermak/pvlp-controller/issues",
+  "codeowners": ["@ocermak"],
+  "config_flow": true,
+  "iot_class": "local_polling",
+  "integration_type": "service",
+  "requirements": ["pulp>=2.8"]
+}
