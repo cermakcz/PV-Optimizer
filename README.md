@@ -57,13 +57,34 @@ Three steps in the UI:
 | Solver   | Slot length (default 60 min), horizon (default 24 h), update interval (default 5 min), max grid import/export (kW), set-point write tolerance (W). |
 
 ### Expected attribute shapes
-- **Hourly tariff sensors** (e.g. Nordpool, OTE) must expose a `today` list
-  of 24 floats; an optional `tomorrow` list is used after midnight.
+- **Hourly tariff sensors** — three shapes are auto-detected:
+  - `list[float]` of length 24 under the configured attribute name (default
+    `today` / `tomorrow`; Nordpool/OTE legacy shape);
+  - `dict[str, float]` under the configured attribute name, keyed by ISO 8601
+    timestamps with timezone offset, e.g. `{"2026-05-01T06:00:00+02:00": 0.12}`;
+  - **top-level ISO-keyed attributes** — the entity's `attributes` dict itself
+    is the price map, with each hour timestamp as its own attribute key (this
+    is what `spot_hodinovy_tarif` and similar plugins do). Unrelated metadata
+    keys are ignored; the configured attribute name doesn't have to match.
+
+  With either dict shape today's and tomorrow's hours may live on a single
+  entity or be split across today/tomorrow entities — both work.
+
+  **Staleness contract (dict shapes only):** if the *current* hour's key is
+  missing, the planner refuses to run and records `last_error` rather than
+  silently re-using yesterday's prices. Missing *future* hours simply
+  truncate the planning horizon.
 - **PV forecast** sensor must expose either a `wh_hours` dict
   (`forecast.solar` style: `{"<iso-hour>": Wh}`) or a `forecast` list of
   `{"datetime": "<iso>", "power_kw": <kW>}` entries.
-- **Load forecast** is optional; with no forecast, the planner uses the
-  current load reading as a flat estimate.
+- **Load forecast** is optional. When unset, a built-in forecaster derives a
+  per-slot expected load from the recorder history of the configured load-power
+  entity using the **median over the last `lookback_days` days at the same
+  hour-of-day** (default `7`). Median naturally rejects one-off spikes (e.g.
+  an EV charging session) without explicit detection. Optional knobs: `cap_kw`
+  (hard ceiling) and `weekday_aware` (only days with the same weekday
+  contribute; needs ~4 weeks of history to be useful). Setting an external
+  `load_forecast_entity` disables the built-in forecaster (escape hatch).
 
 ## Diagnostic sensors
 Five sensors are created so the plan is visible in HA dashboards:
@@ -85,9 +106,10 @@ python3 -m venv .venv
 
 The test suite runs in a plain virtualenv, **without** installing Home
 Assistant. It covers:
-- the LP formulation (10 scenarios in `tests/test_optimizer.py`)
-- the read→solve→apply planner pipeline (4 scenarios in
-  `tests/test_planner.py`).
+- the LP formulation in `tests/test_optimizer.py`
+- the read→solve→apply planner pipeline in `tests/test_planner.py`,
+  including legacy list and timestamp-keyed dict price formats plus the
+  stale-data hard-failure path.
 
 The HA-side files (`coordinator.py`, `config_flow.py`, `sensor.py`) are
 deliberately thin shims over the pure layer; they are exercised inside a

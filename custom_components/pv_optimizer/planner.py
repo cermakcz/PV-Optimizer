@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Protocol
 
+from .load_forecaster import LoadForecaster
 from .models import (
     BatteryParams,
     OptimizerError,
@@ -85,10 +86,12 @@ class PlanCycle:
 class Planner:
     """End-to-end: read state, solve, apply setpoint + feed-in switch."""
 
-    def __init__(self, config: PlannerConfig, reader: StateReader, caller: ServiceCaller) -> None:
+    def __init__(self, config: PlannerConfig, reader: StateReader, caller: ServiceCaller,
+                 load_forecaster: LoadForecaster | None = None) -> None:
         self.config = config
         self.reader = reader
         self.caller = caller
+        self.load_forecaster = load_forecaster
         self.last: PlanCycle | None = None
 
     # ---- public API ------------------------------------------------------
@@ -131,27 +134,43 @@ class Planner:
         slot_h = cfg.slot_minutes / 60.0
         n_slots = max(1, int(round(cfg.horizon_hours / slot_h)))
         first_start = _floor_to_slot(now, cfg.slot_minutes)
-        slot_starts = [first_start + timedelta(minutes=cfg.slot_minutes * i) for i in range(n_slots)]
+        candidate_starts = [first_start + timedelta(minutes=cfg.slot_minutes * i) for i in range(n_slots)]
 
-        buy_today = self._read_hourly(cfg.buy_price_today_entity, cfg.price_today_attr)
-        sell_today = self._read_hourly(cfg.sell_price_today_entity, cfg.price_today_attr)
-        buy_tomorrow = self._read_hourly_optional(cfg.buy_price_tomorrow_entity, cfg.price_tomorrow_attr) or buy_today
-        sell_tomorrow = self._read_hourly_optional(cfg.sell_price_tomorrow_entity, cfg.price_tomorrow_attr) or sell_today
-
+        # Build {hour-key -> price} maps. Both list (legacy Nordpool-style) and
+        # timestamp-keyed dict shapes are accepted; a missing future hour
+        # truncates the horizon, while a missing current hour is a hard error
+        # (treats stale-data scenarios explicitly).
+        buy_map = self._build_price_map(
+            cfg.buy_price_today_entity, cfg.price_today_attr,
+            cfg.buy_price_tomorrow_entity, cfg.price_tomorrow_attr,
+            first_start.date(),
+        )
+        sell_map = self._build_price_map(
+            cfg.sell_price_today_entity, cfg.price_today_attr,
+            cfg.sell_price_tomorrow_entity, cfg.price_tomorrow_attr,
+            first_start.date(),
+        )
         feedin_global = self._read_bool_optional(cfg.feedin_override_entity, default=True)
 
         slots: list[TariffSlot] = []
-        for start in slot_starts:
-            day_offset = (start.date() - first_start.date()).days
-            buy_arr = buy_today if day_offset == 0 else buy_tomorrow
-            sell_arr = sell_today if day_offset == 0 else sell_tomorrow
-            hour = start.hour
+        slot_starts: list[datetime] = []
+        for start in candidate_starts:
+            hour_key = start.replace(minute=0, second=0, microsecond=0)
+            pb = buy_map.get(hour_key)
+            ps = sell_map.get(hour_key)
+            if pb is None or ps is None:
+                if not slots:
+                    raise ValueError(
+                        f"price data for current slot {hour_key.isoformat()} is missing "
+                        "(stale tariff sensor?)"
+                    )
+                break  # truncate horizon at first missing future hour
             slots.append(TariffSlot(
                 start=start, duration_h=slot_h,
-                price_buy=float(buy_arr[hour % len(buy_arr)]),
-                price_sell=float(sell_arr[hour % len(sell_arr)]),
+                price_buy=pb, price_sell=ps,
                 feedin_allowed=feedin_global,
             ))
+            slot_starts.append(start)
 
         pv_kw = self._read_pv_forecast(cfg.pv_forecast_entity, slot_starts, slot_h)
         load_kw = self._read_load_forecast(cfg.load_forecast_entity, slot_starts, slot_h, load_kw_now)
@@ -165,6 +184,77 @@ class Planner:
             p_grid_imp_max_kw=cfg.p_grid_imp_max_kw,
             p_grid_exp_max_kw=cfg.p_grid_exp_max_kw,
         )
+
+    # ---- price source readers -------------------------------------------
+    def _build_price_map(self, entity_today: str, attr_today: str,
+                         entity_tomorrow: str | None, attr_tomorrow: str,
+                         today_date) -> dict[datetime, float]:
+        """Merge today's (and optionally tomorrow's) price entity into one map.
+
+        Keys are naive UTC datetimes truncated to the hour. Tomorrow's entries
+        override today's on overlap (rare, but explicit).
+        """
+        out: dict[datetime, float] = {}
+        out.update(self._read_price_source(entity_today, attr_today, today_date))
+        if entity_tomorrow:
+            try:
+                out.update(self._read_price_source(
+                    entity_tomorrow, attr_tomorrow, today_date + timedelta(days=1)))
+            except (KeyError, ValueError):
+                # Tomorrow not yet published — that's fine, planner truncates.
+                pass
+        return out
+
+    def _read_price_source(self, entity_id: str, attr: str,
+                           default_date) -> dict[datetime, float]:
+        """Read one price entity.
+
+        Three shapes are accepted:
+        * ``attributes[attr]`` is a ``dict[iso_timestamp, float]`` (wrapped),
+        * ``attributes[attr]`` is a ``list[float]`` of 24 hourly prices,
+        * the entity exposes hour timestamps as *top-level* attribute keys
+          (``attributes`` itself is the price map). This is what plugins like
+          ``spot_hodinovy_tarif`` do — there is no wrapping attribute.
+        """
+        st = self._state(entity_id)
+        raw = st.attributes.get(attr)
+        if isinstance(raw, dict) and raw:
+            return self._parse_iso_keyed_dict(raw, lenient=False)
+        if isinstance(raw, (list, tuple)) and raw:
+            return {datetime.combine(default_date, time(hour=i)): float(v)
+                    for i, v in enumerate(raw)}
+        # Fallback: hour timestamps are themselves the attribute keys.
+        scanned = self._parse_iso_keyed_dict(st.attributes, lenient=True)
+        if scanned:
+            return scanned
+        raise ValueError(
+            f"entity {entity_id!r} attribute {attr!r} missing or unsupported shape "
+            "(expected list[float], dict[iso_timestamp, float], or iso-keyed attributes)"
+        )
+
+    @staticmethod
+    def _parse_iso_keyed_dict(raw: dict, *, lenient: bool) -> dict[datetime, float]:
+        """Parse {iso_timestamp: number} into {naive-UTC hour: float}.
+
+        With ``lenient=True``, entries whose key isn't an ISO timestamp or
+        whose value isn't numeric are silently skipped (used when scanning a
+        whole ``attributes`` dict that may carry unrelated metadata).
+        """
+        out: dict[datetime, float] = {}
+        for k, v in raw.items():
+            try:
+                key = _parse_iso(str(k)).replace(minute=0, second=0, microsecond=0)
+            except (ValueError, TypeError):
+                if lenient:
+                    continue
+                raise
+            try:
+                out[key] = float(v)
+            except (TypeError, ValueError):
+                if lenient:
+                    continue
+                raise
+        return out
 
 
     # ---- low-level readers ----------------------------------------------
@@ -188,27 +278,6 @@ class Planner:
             return default
         return str(st.state).lower() in ("on", "true", "1", "yes")
 
-    def _read_hourly(self, entity_id: str, attr: str) -> list[float]:
-        st = self._state(entity_id)
-        arr = st.attributes.get(attr)
-        if not isinstance(arr, (list, tuple)) or not arr:
-            raise ValueError(f"entity {entity_id!r} attribute {attr!r} is missing or empty")
-        return [float(x) for x in arr]
-
-    def _read_hourly_optional(self, entity_id: str | None, attr: str) -> list[float] | None:
-        if not entity_id:
-            return None
-        st = self.reader.get(entity_id)
-        if st is None:
-            return None
-        arr = st.attributes.get(attr)
-        if not isinstance(arr, (list, tuple)) or not arr:
-            return None
-        try:
-            return [float(x) for x in arr]
-        except (TypeError, ValueError):
-            return None
-
     def _read_pv_forecast(self, entity_id: str, slot_starts: list[datetime], slot_h: float) -> list[float]:
         st = self._state(entity_id)
         # Accept either {"wh_hours": {"<iso>": Wh, ...}} (forecast.solar) or
@@ -228,16 +297,23 @@ class Planner:
 
     def _read_load_forecast(self, entity_id: str | None, slot_starts: list[datetime],
                             slot_h: float, fallback_kw: float) -> list[float]:
-        if not entity_id:
+        # External-entity escape hatch takes precedence over the built-in
+        # forecaster, so users can plug in their own forecast without code
+        # changes.
+        if entity_id:
+            st = self.reader.get(entity_id)
+            if st is not None:
+                forecast = st.attributes.get("forecast")
+                if isinstance(forecast, list) and forecast:
+                    mapping = {_parse_iso(p["datetime"]): float(p.get("power_kw", p.get("power", 0)))
+                               for p in forecast if "datetime" in p}
+                    return [_lookup_forecast(mapping, s, slot_h, default=fallback_kw)
+                            for s in slot_starts]
             return [max(0.0, fallback_kw)] * len(slot_starts)
-        st = self.reader.get(entity_id)
-        if st is None:
-            return [max(0.0, fallback_kw)] * len(slot_starts)
-        forecast = st.attributes.get("forecast")
-        if isinstance(forecast, list) and forecast:
-            mapping = {_parse_iso(p["datetime"]): float(p.get("power_kw", p.get("power", 0)))
-                       for p in forecast if "datetime" in p}
-            return [_lookup_forecast(mapping, s, slot_h, default=fallback_kw) for s in slot_starts]
+        if self.load_forecaster is not None:
+            fc = self.load_forecaster.forecast(slot_starts)
+            return [fc.kw_per_slot.get(s, max(0.0, fallback_kw)) if fc.days_used_per_slot.get(s, 0) > 0
+                    else max(0.0, fallback_kw) for s in slot_starts]
         return [max(0.0, fallback_kw)] * len(slot_starts)
 
     # ---- output appliers -------------------------------------------------

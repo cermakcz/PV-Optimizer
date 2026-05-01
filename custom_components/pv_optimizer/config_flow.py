@@ -12,6 +12,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     EntitySelector,
     EntitySelectorConfig,
     NumberSelector,
@@ -81,6 +82,17 @@ _SOLVER_SCHEMA = vol.Schema({
 })
 
 
+# cap_kw == 0 means "no cap" (matches how __init__.py interprets it).
+_LOAD_FORECAST_SCHEMA = vol.Schema({
+    vol.Required(C.CONF_LOAD_FORECAST_LOOKBACK_DAYS,
+                 default=C.DEFAULT_LOAD_FORECAST_LOOKBACK_DAYS): _num(1, 60, 1, "days"),
+    vol.Required(C.CONF_LOAD_FORECAST_CAP_KW,
+                 default=C.DEFAULT_LOAD_FORECAST_CAP_KW): _num(0.0, 100.0, 0.1, "kW"),
+    vol.Required(C.CONF_LOAD_FORECAST_WEEKDAY_AWARE,
+                 default=C.DEFAULT_LOAD_FORECAST_WEEKDAY_AWARE): BooleanSelector(),
+})
+
+
 class PvOptimizerConfigFlow(config_entries.ConfigFlow, domain=_DOMAIN):
     """Multi-step setup flow."""
 
@@ -104,12 +116,25 @@ class PvOptimizerConfigFlow(config_entries.ConfigFlow, domain=_DOMAIN):
     async def async_step_solver(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
             self._data.update(user_input)
-            return self.async_create_entry(title="PV Optimizer", data=self._data)
+            return await self.async_step_load_forecast()
         return self.async_show_form(step_id="solver", data_schema=_SOLVER_SCHEMA)
+
+    async def async_step_load_forecast(self, user_input: dict[str, Any] | None = None):
+        if user_input is not None:
+            self._data.update(user_input)
+            return self.async_create_entry(title="PV Optimizer", data=self._data)
+        return self.async_show_form(
+            step_id="load_forecast", data_schema=_LOAD_FORECAST_SCHEMA,
+        )
 
     @staticmethod
     def async_get_options_flow(config_entry):
         return PvOptimizerOptionsFlow(config_entry)
+
+
+# Combined schema for the options flow — solver + load-forecast knobs in one
+# screen, since options flow re-edits don't need the full multi-step UX.
+_OPTIONS_SCHEMA = _SOLVER_SCHEMA.extend(_LOAD_FORECAST_SCHEMA.schema)
 
 
 class PvOptimizerOptionsFlow(config_entries.OptionsFlow):
@@ -117,8 +142,7 @@ class PvOptimizerOptionsFlow(config_entries.OptionsFlow):
         self.config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
-        # For brevity, options flow exposes the solver schema only; entity/battery
-        # changes require re-adding the integration.
+        # Entity/battery changes still require re-adding the integration.
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
-        return self.async_show_form(step_id="init", data_schema=_SOLVER_SCHEMA)
+        return self.async_show_form(step_id="init", data_schema=_OPTIONS_SCHEMA)

@@ -45,6 +45,11 @@ CONF_SETPOINT_TOLERANCE_W = "setpoint_tolerance_w"
 CONF_BUY_SURCHARGE = "buy_surcharge_eur_per_kwh"
 CONF_SELL_SURCHARGE = "sell_surcharge_eur_per_kwh"
 
+# --- Built-in load forecaster ---
+CONF_LOAD_FORECAST_LOOKBACK_DAYS = "load_forecast_lookback_days"
+CONF_LOAD_FORECAST_CAP_KW = "load_forecast_cap_kw"
+CONF_LOAD_FORECAST_WEEKDAY_AWARE = "load_forecast_weekday_aware"
+
 # --- Defaults ---
 DEFAULT_SLOT_MINUTES = 60
 DEFAULT_HORIZON_HOURS = 24
@@ -55,3 +60,6 @@ DEFAULT_ETA_CHG = 0.95
 DEFAULT_ETA_DIS = 0.95
 DEFAULT_CYCLE_COST = 0.05  # EUR/kWh of throughput
 DEFAULT_SETPOINT_TOLERANCE_W = 50.0
+DEFAULT_LOAD_FORECAST_LOOKBACK_DAYS = 7
+DEFAULT_LOAD_FORECAST_CAP_KW = 0.0   # 0 = no cap
+DEFAULT_LOAD_FORECAST_WEEKDAY_AWARE = False

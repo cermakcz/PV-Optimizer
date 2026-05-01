@@ -50,13 +50,73 @@ HA sensor entities ──► Coordinator ──► Optimizer (pure) ──► Op
 | Battery state of charge (%) | yes | converted to kWh via configured capacity |
 | PV current power (W) | yes | informational + plan execution feedback |
 | Grid power (W, signed) | yes | informational |
-| Buy price today, hourly (EUR/kWh) | yes | 24 floats; e.g. Nordpool/OTE/`spot_hodinovy_tarif` |
-| Buy price tomorrow, hourly | optional | falls back to repeating today |
+| Buy price today, hourly (EUR/kWh) | yes | `list[24]` (Nordpool-style) **or** `dict[iso_timestamp, float]` (timestamp-keyed; preferred — see §4.1) |
+| Buy price tomorrow, hourly | optional | same shape; if absent, the horizon is truncated to today's last known hour |
 | Sell price today, hourly | yes | may equal buy with FiT subtractor |
 | Sell price tomorrow, hourly | optional | as above |
 | PV power forecast, hourly (kW) | yes | e.g. `forecast.solar` |
-| Load forecast, hourly (kW) | optional | falls back to flat = recent average |
+| Load forecast, hourly (kW) | optional | escape hatch; if unset the built-in forecaster (§4.2) is used |
 | Feed-in allowed override | optional | external switch forcing feed-in off |
+
+### 4.1 Price-attribute shapes & staleness contract
+The tariff attribute (configurable name, default `today` / `tomorrow`) may be
+any of three shapes — the planner auto-detects which is in use:
+
+- **`list[float]` of length 24** — legacy Nordpool/OTE shape. Indexed by hour
+  of the local day; assumed to always represent "today's" 24 hours.
+- **`dict[str, float]`** under the configured attribute name, keyed by ISO 8601
+  timestamps with timezone offset (e.g. `"2026-05-01T06:00:00+02:00"`).
+- **Top-level ISO-keyed attributes** — the entity's *entire* `attributes`
+  dict carries hour-timestamp keys directly, with no wrapping attribute
+  (this is what `spot_hodinovy_tarif` and similar Czech/CEE plugins do).
+  Unrelated metadata keys (`unit_of_measurement`, `friendly_name`, …) are
+  ignored. The configured attribute name is irrelevant in this case.
+
+The dict shapes are preferred because they carry an explicit "as-of" anchor.
+
+When the dict shape is used:
+- Today and tomorrow may be merged into a single entity attribute, or split
+  across the today/tomorrow entities — both work.
+- If the **current** slot's hour key is absent, the planner refuses to run
+  and surfaces a `last_error` ("price data for current slot … is missing —
+  stale tariff sensor?"). This protects against a frozen/last-good price
+  source where a `list[24]` would silently look fresh.
+- If a **future** slot's hour key is absent, the horizon is truncated at the
+  first gap. The optimizer simply plans over the shorter window.
+
+### 4.2 Built-in load forecaster
+When the optional `load_forecast_entity` is unset, the integration uses an
+internal forecaster (`load_forecaster.py`) that derives a per-slot expected
+household load from the recorder history of the configured load-power entity.
+
+Algorithm: **median over the last *N* days at the same hour-of-day**, with
+optional cap and weekday awareness.
+
+```
+forecast[H] = clip(median(load[d, H] for d in last_N_days), 0, cap_kw)
+```
+
+Median (rather than mean) is used so that one-off spikes — e.g. a single
+EV-charging session, an unusual guest day, an HVAC outlier — do not bias the
+forecast. No spike *detection* is required.
+
+Configuration knobs (with defaults):
+| Knob | Default | Notes |
+|---|---|---|
+| `lookback_days` | `7` | Window used per hour-bucket. |
+| `cap_kw` | `None` | Optional hard ceiling (kW). |
+| `weekday_aware` | `false` | If true, only days with the same weekday as the target slot contribute; needs ~4 weeks of history to be useful. |
+
+The forecaster is consumed directly by the planner (no roundtrip through HA
+state). A diagnostic sensor `sensor.pv_optimizer_load_forecast` is also
+published with `attributes.kw_per_slot` and `attributes.lookback_days_used`
+for observability — nothing reads it back. Setting `load_forecast_entity` to
+any user-supplied entity disables the built-in forecaster (escape hatch).
+
+If no usable history exists (fresh install, or no samples at the target hour
+for any of the lookback days), the planner falls back to the current
+load-power reading for that slot — same behavior as if no forecaster were
+present at all.
 
 ## 5. Outputs (controlled HA entities, configurable)
 | Output | Type | Semantics |

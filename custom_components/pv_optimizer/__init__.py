@@ -16,7 +16,7 @@ __all__ = ["DOMAIN", "PLATFORMS", "async_setup_entry", "async_unload_entry"]
 async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
     """Set up pv_optimizer from a config entry (HA path)."""
     # Imports deferred so this module is import-safe without homeassistant.
-    from .coordinator import PvOptimizerCoordinator
+    from .coordinator import LoadForecasterOptions, PvOptimizerCoordinator
     from .models import BatteryParams
     from .planner import PlannerConfig
     from . import const as C
@@ -56,7 +56,18 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
         horizon_hours=int(data[C.CONF_HORIZON_HOURS]),
         setpoint_tolerance_w=float(data[C.CONF_SETPOINT_TOLERANCE_W]),
     )
-    coord = PvOptimizerCoordinator(hass, config, int(data[C.CONF_UPDATE_SECONDS]))
+    cap_raw = float(data.get(C.CONF_LOAD_FORECAST_CAP_KW, C.DEFAULT_LOAD_FORECAST_CAP_KW))
+    forecaster_opts = LoadForecasterOptions(
+        lookback_days=int(data.get(C.CONF_LOAD_FORECAST_LOOKBACK_DAYS,
+                                   C.DEFAULT_LOAD_FORECAST_LOOKBACK_DAYS)),
+        cap_kw=cap_raw if cap_raw > 0 else None,
+        weekday_aware=bool(data.get(C.CONF_LOAD_FORECAST_WEEKDAY_AWARE,
+                                    C.DEFAULT_LOAD_FORECAST_WEEKDAY_AWARE)),
+    )
+    coord = PvOptimizerCoordinator(
+        hass, config, int(data[C.CONF_UPDATE_SECONDS]),
+        forecaster_opts=forecaster_opts,
+    )
     await coord.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
