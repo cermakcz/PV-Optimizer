@@ -148,12 +148,15 @@ class PvOptimizerConfigFlow(config_entries.ConfigFlow, domain=_DOMAIN):
         return PvOptimizerOptionsFlow()
 
 
-# Combined schema for the options flow — battery + solver + load-forecast knobs
-# in one screen, since options flow re-edits don't need the full multi-step UX.
-# Entity selections still require re-adding the integration.
-_OPTIONS_SCHEMA = _BATTERY_SCHEMA.extend(_SOLVER_SCHEMA.schema).extend(
-    _LOAD_FORECAST_SCHEMA.schema
-)
+# Combined schema for the options flow — entities + battery + solver +
+# load-forecast knobs in one screen, since options flow re-edits don't need
+# the full multi-step UX. Including ``_ENTITIES_SCHEMA`` lets users rebind
+# any sensor (e.g. add a feed-in override after initial setup) without
+# deleting and re-adding the integration; ``__init__.py`` registers an
+# update listener that reloads the entry when options change.
+_OPTIONS_SCHEMA = _ENTITIES_SCHEMA.extend(_BATTERY_SCHEMA.schema).extend(
+    _SOLVER_SCHEMA.schema
+).extend(_LOAD_FORECAST_SCHEMA.schema)
 
 
 def _schema_with_suggestions(schema: vol.Schema, current: dict[str, Any]) -> vol.Schema:

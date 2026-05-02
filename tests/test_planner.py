@@ -190,6 +190,53 @@ def test_pv_surplus_triggers_feedin_on_without_forced_setpoint() -> None:
     assert ("switch", "turn_on") in [(d, s) for d, s, _ in caller.calls]
 
 
+def test_physical_soc_projection_charges_in_passive_surplus() -> None:
+    # Same passive-surplus scenario as above. The LP's bookkeeping leaves
+    # soc_start_kwh flat (no p_chg_kw because the export is profitable enough
+    # without cycling), but the inverter physically absorbs the 4 kW surplus
+    # into the battery — soc_physical_kwh should reflect that.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    states = _states(pv_forecast=pv_forecast)
+    planner = Planner(_config(), FakeReader(states), FakeCaller())
+
+    cycle = planner.step(NOW)
+    slots = cycle.result.slots
+
+    # Initial SoC = 50% of 10 kWh = 5 kWh; soc_max = 9 kWh.
+    assert slots[0].soc_physical_kwh == pytest.approx(5.0, abs=1e-3)
+    # 4 kW surplus * 1 h * eta_chg=1.0 = 4 kWh charged within headroom (4 kWh).
+    assert slots[1].soc_physical_kwh == pytest.approx(9.0, abs=1e-3)
+    # Battery full; subsequent slots stay pinned at soc_max.
+    for s in slots[1:]:
+        assert s.soc_physical_kwh == pytest.approx(9.0, abs=1e-3)
+    # LP bookkeeping never cycled the battery — projection diverges from it.
+    assert slots[1].soc_start_kwh == pytest.approx(5.0, abs=1e-3)
+
+
+def test_physical_soc_projection_follows_lp_when_forced() -> None:
+    # Same setup as ``test_force_charge_writes_positive_setpoint``: cheap
+    # noon buy, expensive afterwards, no profitable export. The LP forces
+    # a battery charge from the grid in slot 0; the projection must defer
+    # to that LP decision rather than re-running self-consumption logic.
+    states = _states(
+        load_w=500.0,
+        buy=_hourly(value_at_noon=0.01, value_elsewhere=5.0),
+        sell=[0.0] * 24,
+    )
+    planner = Planner(_config(), FakeReader(states), FakeCaller())
+
+    cycle = planner.step(NOW)
+    slots = cycle.result.slots
+
+    first = slots[0]
+    assert first.p_buy_kw > 1e-3 and first.p_chg_kw > 1e-3  # force-charge triggered
+    # Under force-charge the projection mirrors the LP exactly.
+    assert first.soc_physical_kwh == pytest.approx(first.soc_start_kwh, abs=1e-3)
+    # Next slot's projection equals LP's next soc_start (eta=1.0 in tests).
+    assert slots[1].soc_physical_kwh == pytest.approx(slots[1].soc_start_kwh, abs=1e-3)
+
+
 
 # ---------------------------------------------------------------------------
 # Dict-shaped (timestamp-keyed) price entity

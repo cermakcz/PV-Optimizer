@@ -88,7 +88,14 @@ class OptimizerInputs:
 
 @dataclass(frozen=True)
 class SlotPlan:
-    """Optimal decisions for a single slot (kW for power, kWh for SoC)."""
+    """Optimal decisions for a single slot (kW for power, kWh for SoC).
+
+    ``soc_physical_kwh`` is a planner-layer projection of the *actual* SoC
+    the inverter is expected to reach at slot start, simulating passive
+    self-consumption (PV→battery→export) for slots where the LP issues no
+    forced setpoint. Left ``None`` by the optimizer; populated by the
+    planner when wrapping the LP result.
+    """
 
     index: int
     start: datetime
@@ -98,6 +105,7 @@ class SlotPlan:
     p_chg_kw: float
     p_dis_kw: float
     soc_start_kwh: float
+    soc_physical_kwh: float | None = None
 
 
 @dataclass(frozen=True)

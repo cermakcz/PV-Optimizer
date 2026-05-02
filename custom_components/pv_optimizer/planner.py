@@ -7,7 +7,7 @@ implementations backed by ``hass``.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Protocol
 
@@ -19,11 +19,18 @@ from .models import (
     OptimizerError,
     OptimizerInputs,
     OptimizerResult,
+    SlotPlan,
     TariffSlot,
 )
 from .optimizer import solve
 
 _LOGGER = logging.getLogger(__name__)
+
+# Threshold (kW) above which an LP variable is treated as a meaningful
+# command rather than solver noise. Shared between force-charge / force-
+# discharge detection and the passive-projection helper so both agree on
+# which slots are "active" vs "passive".
+_FORCE_EPS = 1e-3
 
 
 @dataclass(frozen=True)
@@ -108,6 +115,14 @@ class Planner:
             self.last = cycle
             return cycle
 
+        # Augment the LP slots with a physical SoC projection. The LP
+        # bookkeeping curtails surplus PV in passive slots (so soc_start_kwh
+        # may stay flat across midday); the projection re-runs the inverter's
+        # self-consumption rule to estimate the SoC the battery will actually
+        # reach. Useful for chart overlays, not used for control.
+        result = replace(result,
+                         slots=_attach_physical_soc(inputs, result.slots, _FORCE_EPS))
+
         # Translate the LP plan for the next slot into inverter actions.
         #
         # The grid setpoint should only override the inverter's natural
@@ -124,14 +139,13 @@ class Planner:
         # was never asked to defend. Setpoint = 0 puts the inverter back
         # in charge of those degrees of freedom.
         first = result.slots[0]
-        eps = 1e-3
-        force_discharge = first.p_dis_kw > eps and first.p_sell_kw > eps
-        force_charge = first.p_buy_kw > eps and first.p_chg_kw > eps
+        force_discharge = first.p_dis_kw > _FORCE_EPS and first.p_sell_kw > _FORCE_EPS
+        force_charge = first.p_buy_kw > _FORCE_EPS and first.p_chg_kw > _FORCE_EPS
         if force_discharge or force_charge:
             setpoint_w = (first.p_buy_kw - first.p_sell_kw) * 1000.0
         else:
             setpoint_w = 0.0
-        feedin = first.p_sell_kw > eps
+        feedin = first.p_sell_kw > _FORCE_EPS
 
         prev_sp = self.last.applied_setpoint_w if self.last else None
         if prev_sp is None or abs(setpoint_w - prev_sp) > self.config.setpoint_tolerance_w:
@@ -407,3 +421,52 @@ def _lookup_forecast(mapping: dict[datetime, float], slot_start: datetime,
     key = slot_start.replace(tzinfo=None) if slot_start.tzinfo else slot_start
     key = key.replace(second=0, microsecond=0, minute=(key.minute // 60) * 60)
     return float(mapping.get(key, default))
+
+
+def _attach_physical_soc(inputs: OptimizerInputs,
+                         plan_slots: list[SlotPlan],
+                         eps: float) -> list[SlotPlan]:
+    """Return ``plan_slots`` with ``soc_physical_kwh`` filled in.
+
+    For each slot we estimate the SoC the inverter will physically reach
+    at slot start, distinct from the LP's bookkeeping ``soc_start_kwh``:
+
+    * If the LP forces a battery action (force-charge or force-discharge,
+      same predicate the planner uses to decide whether to override the
+      inverter setpoint), the inverter follows the LP and we apply the
+      LP's own SoC update.
+    * Otherwise the inverter runs in self-consumption mode (setpoint=0):
+      surplus PV charges the battery up to ``soc_max``, deficit is met by
+      discharging down to ``soc_min``; the rest spills to grid or is
+      curtailed. This is what the Multiplus actually does between forced
+      slots, so the projected SoC tracks reality more closely than the LP
+      bookkeeping does (which curtails surplus PV in passive slots).
+    """
+    bat = inputs.battery
+    soc = inputs.initial_soc_kwh
+    out: list[SlotPlan] = []
+    for t, sp in enumerate(plan_slots):
+        dt = inputs.slots[t].duration_h
+        pv = inputs.pv_kw[t]
+        load = inputs.load_kw[t]
+        force_discharge = sp.p_dis_kw > eps and sp.p_sell_kw > eps
+        force_charge = sp.p_buy_kw > eps and sp.p_chg_kw > eps
+        out.append(replace(sp, soc_physical_kwh=soc))
+        if force_charge or force_discharge:
+            dsoc = dt * (bat.eta_chg * sp.p_chg_kw - sp.p_dis_kw / bat.eta_dis)
+        else:
+            net = pv - load  # >0 surplus, <0 deficit, all on AC side
+            if net > eps:
+                # AC kW that fits in remaining headroom over this slot.
+                max_chg_ac = (bat.soc_max_kwh - soc) / (bat.eta_chg * dt) if dt > 0 else 0.0
+                chg_ac = min(net, bat.p_chg_max_kw, max(0.0, max_chg_ac))
+                dsoc = dt * bat.eta_chg * chg_ac
+            elif net < -eps:
+                # AC kW deliverable from remaining usable energy over this slot.
+                max_dis_ac = (soc - bat.soc_min_kwh) * bat.eta_dis / dt if dt > 0 else 0.0
+                dis_ac = min(-net, bat.p_dis_max_kw, max(0.0, max_dis_ac))
+                dsoc = -dt * dis_ac / bat.eta_dis
+            else:
+                dsoc = 0.0
+        soc = max(bat.soc_min_kwh, min(bat.soc_max_kwh, soc + dsoc))
+    return out

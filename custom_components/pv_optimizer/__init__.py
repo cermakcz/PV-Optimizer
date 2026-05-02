@@ -72,7 +72,17 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
     await coord.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Reload the entry whenever the user saves the Options form, so changes
+    # to entity bindings / battery params / solver knobs take effect without
+    # an HA restart. ``async_on_unload`` ensures the listener is detached on
+    # unload so a subsequent reload doesn't double-register.
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
+
+
+async def _async_update_listener(hass, entry):  # type: ignore[no-untyped-def]
+    """Reload the config entry when its options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass, entry):  # type: ignore[no-untyped-def]
