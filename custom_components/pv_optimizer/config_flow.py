@@ -19,6 +19,8 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
 )
 
 from . import const as C
@@ -67,6 +69,11 @@ _ENTITIES_SCHEMA = vol.Schema({
 
 
 _BATTERY_SCHEMA = vol.Schema({
+    # Free-text currency label (e.g. "EUR", "USD", "CZK"). The planner is
+    # currency-agnostic; this string only feeds sensor units and form labels.
+    vol.Required(C.CONF_CURRENCY, default=C.DEFAULT_CURRENCY): TextSelector(
+        TextSelectorConfig(),
+    ),
     vol.Required(C.CONF_BATTERY_CAPACITY_KWH, default=10.0): _num(0.1, 1000.0, 0.1, "kWh"),
     vol.Required(C.CONF_BATTERY_SOC_MIN_PCT, default=C.DEFAULT_SOC_MIN_PCT): _num(0.0, 100.0, 1.0, "%"),
     vol.Required(C.CONF_BATTERY_SOC_MAX_PCT, default=C.DEFAULT_SOC_MAX_PCT): _num(0.0, 100.0, 1.0, "%"),
@@ -74,7 +81,10 @@ _BATTERY_SCHEMA = vol.Schema({
     vol.Required(C.CONF_BATTERY_P_DIS_MAX_KW, default=5.0): _num(0.0, 100.0, 0.1, "kW"),
     vol.Required(C.CONF_BATTERY_ETA_CHG, default=C.DEFAULT_ETA_CHG): _num(0.5, 1.0, 0.01),
     vol.Required(C.CONF_BATTERY_ETA_DIS, default=C.DEFAULT_ETA_DIS): _num(0.5, 1.0, 0.01),
-    vol.Required(C.CONF_BATTERY_CYCLE_COST, default=C.DEFAULT_CYCLE_COST): _num(0.0, 10.0, 0.001, "your_currency/kWh"),
+    # The currency portion of the unit can't be substituted into a static
+    # NumberSelector label at schema-build time, so we leave it as a bare
+    # "/kWh" suffix and rely on the Currency field above for context.
+    vol.Required(C.CONF_BATTERY_CYCLE_COST, default=C.DEFAULT_CYCLE_COST): _num(0.0, 10.0, 0.001, "/kWh"),
 })
 
 

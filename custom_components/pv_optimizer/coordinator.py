@@ -98,13 +98,16 @@ class PvOptimizerCoordinator(DataUpdateCoordinator[PlanCycle]):
 
     def __init__(self, hass: HomeAssistant, config: PlannerConfig,
                  update_seconds: int,
-                 forecaster_opts: LoadForecasterOptions | None = None) -> None:
+                 forecaster_opts: LoadForecasterOptions | None = None,
+                 currency: str = "EUR") -> None:
         super().__init__(
             hass,
             _LOGGER,
             name="pv_optimizer",
             update_interval=timedelta(seconds=update_seconds),
         )
+        # Display-only currency label; surfaced via cost/savings sensor units.
+        self.currency = currency
         self.forecaster: LoadForecaster | None = None
         # Built-in forecaster only kicks in when the user did not point to
         # an external load_forecast_entity (escape hatch contract).

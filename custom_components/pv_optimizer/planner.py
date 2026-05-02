@@ -108,10 +108,30 @@ class Planner:
             self.last = cycle
             return cycle
 
+        # Translate the LP plan for the next slot into inverter actions.
+        #
+        # The grid setpoint should only override the inverter's natural
+        # self-consumption logic when the LP actively wants to move energy
+        # *between the battery and the grid*. In every other case
+        # (PV surplus export, PV-deficit import, idle battery) we hand
+        # control back to the inverter with setpoint = 0 — the Multiplus
+        # then runs self-consumption mode (PV → load → battery → grid)
+        # with surplus exported iff the feed-in switch is on.
+        #
+        # Forcing a non-zero setpoint when the LP doesn't intend a battery
+        # transfer is brittle to forecast error: a PV undershoot would make
+        # the inverter discharge the battery to hit a negative target it
+        # was never asked to defend. Setpoint = 0 puts the inverter back
+        # in charge of those degrees of freedom.
         first = result.slots[0]
-        net_grid_kw = first.p_buy_kw - first.p_sell_kw
-        setpoint_w = net_grid_kw * 1000.0
-        feedin = first.p_sell_kw > 1e-3
+        eps = 1e-3
+        force_discharge = first.p_dis_kw > eps and first.p_sell_kw > eps
+        force_charge = first.p_buy_kw > eps and first.p_chg_kw > eps
+        if force_discharge or force_charge:
+            setpoint_w = (first.p_buy_kw - first.p_sell_kw) * 1000.0
+        else:
+            setpoint_w = 0.0
+        feedin = first.p_sell_kw > eps
 
         prev_sp = self.last.applied_setpoint_w if self.last else None
         if prev_sp is None or abs(setpoint_w - prev_sp) > self.config.setpoint_tolerance_w:

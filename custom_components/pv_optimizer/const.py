@@ -31,7 +31,7 @@ CONF_BATTERY_P_CHG_MAX_KW = "battery_p_chg_max_kw"
 CONF_BATTERY_P_DIS_MAX_KW = "battery_p_dis_max_kw"
 CONF_BATTERY_ETA_CHG = "battery_eta_chg"
 CONF_BATTERY_ETA_DIS = "battery_eta_dis"
-CONF_BATTERY_CYCLE_COST = "battery_cycle_cost_eur_per_kwh"
+CONF_BATTERY_CYCLE_COST = "battery_cycle_cost_per_kwh"
 
 # --- Solver / planning ---
 CONF_SLOT_MINUTES = "slot_minutes"
@@ -42,8 +42,14 @@ CONF_GRID_EXPORT_MAX_KW = "grid_export_max_kw"
 CONF_SETPOINT_TOLERANCE_W = "setpoint_tolerance_w"
 
 # --- Tariff surcharges (added to spot prices) ---
-CONF_BUY_SURCHARGE = "buy_surcharge_eur_per_kwh"
-CONF_SELL_SURCHARGE = "sell_surcharge_eur_per_kwh"
+CONF_BUY_SURCHARGE = "buy_surcharge_per_kwh"
+CONF_SELL_SURCHARGE = "sell_surcharge_per_kwh"
+
+# --- Currency (display only; the planner is currency-agnostic and treats
+# tariff prices as opaque per-kWh numbers in whatever unit the user's
+# tariff sensors report). Used as the unit_of_measurement for cost/savings
+# sensors and as a label suffix on currency-denominated config fields.
+CONF_CURRENCY = "currency"
 
 # --- Built-in load forecaster ---
 CONF_LOAD_FORECAST_LOOKBACK_DAYS = "load_forecast_lookback_days"
@@ -64,3 +70,4 @@ DEFAULT_SETPOINT_TOLERANCE_W = 50.0
 DEFAULT_LOAD_FORECAST_LOOKBACK_DAYS = 7
 DEFAULT_LOAD_FORECAST_CAP_KW = 0.0   # 0 = no cap
 DEFAULT_LOAD_FORECAST_WEEKDAY_AWARE = False
+DEFAULT_CURRENCY = "EUR"

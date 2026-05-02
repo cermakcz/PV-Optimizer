@@ -55,7 +55,7 @@ def _battery(**overrides) -> BatteryParams:
         p_dis_max_kw=5.0,
         eta_chg=1.0,
         eta_dis=1.0,
-        cycle_cost_eur_per_kwh=0.0,
+        cycle_cost_per_kwh=0.0,
     )
     base.update(overrides)
     return BatteryParams(**base)
@@ -71,7 +71,7 @@ def test_pv_equals_load_zero_action() -> None:
     inp = OptimizerInputs(slots, [1.0] * 4, [1.0] * 4, 5.0, bat, 10, 10)
     r = solve(inp)
     assert r.status == "Optimal"
-    assert r.total_cost_eur == pytest.approx(0.0, abs=1e-6)
+    assert r.total_cost == pytest.approx(0.0, abs=1e-6)
     for sp in r.slots:
         assert sp.p_buy_kw == pytest.approx(0.0, abs=1e-6)
         assert sp.p_sell_kw == pytest.approx(0.0, abs=1e-6)
@@ -84,9 +84,9 @@ def test_surplus_pv_exports_when_feedin_allowed() -> None:
     slots = _slots([0.30] * 4, [0.10] * 4)  # buy high, sell low
     inp = OptimizerInputs(slots, [3.0] * 4, [1.0] * 4, 5.0, bat, 10, 10)
     r = solve(inp)
-    # Net surplus = 2 kW * 4h = 8 kWh; sold at 0.10 -> -0.80 EUR (profit).
+    # Net surplus = 2 kW * 4h = 8 kWh; sold at 0.10 -> -0.80 (profit).
     # Per-slot distribution is degenerate when cycle cost is zero, so check totals.
-    assert r.total_cost_eur == pytest.approx(-0.80, abs=1e-4)
+    assert r.total_cost == pytest.approx(-0.80, abs=1e-4)
     total_sell = sum(sp.p_sell_kw * sp.duration_h for sp in r.slots)
     total_buy = sum(sp.p_buy_kw * sp.duration_h for sp in r.slots)
     assert total_sell - total_buy == pytest.approx(8.0, abs=1e-4)
@@ -111,7 +111,7 @@ def test_surplus_pv_charges_battery_when_feedin_disabled() -> None:
 # ---------------------------------------------------------------------------
 
 def test_arbitrage_cheap_to_expensive_no_cycle_cost() -> None:
-    bat = _battery(cycle_cost_eur_per_kwh=0.0)
+    bat = _battery(cycle_cost_per_kwh=0.0)
     # 4 cheap hours then 4 expensive hours; load 1 kW; no PV.
     prices = [0.05] * 4 + [0.30] * 4
     slots = _slots(prices, [0.0] * 8)  # no export to keep test focused
@@ -122,12 +122,12 @@ def test_arbitrage_cheap_to_expensive_no_cycle_cost() -> None:
     expensive_buy = sum(sp.p_buy_kw for sp in r.slots[4:])
     assert cheap_buy > expensive_buy
     # Must be cheaper than passive (always buying at hourly price).
-    assert r.savings_eur > 0.0
+    assert r.savings > 0.0
 
 
 def test_high_cycle_cost_kills_arbitrage() -> None:
     # Spread is 0.10, throughput cost on charge+discharge would be 2 * 0.20 = 0.40 -> never pays.
-    bat = _battery(cycle_cost_eur_per_kwh=0.20)
+    bat = _battery(cycle_cost_per_kwh=0.20)
     prices = [0.05] * 4 + [0.15] * 4
     slots = _slots(prices, [0.0] * 8)
     inp = OptimizerInputs(slots, [0.0] * 8, [1.0] * 8, 5.0, bat, 10, 10)
@@ -173,8 +173,8 @@ def test_lower_round_trip_eta_reduces_savings() -> None:
                        initial_soc_kwh=5.0, p_grid_imp_max_kw=10, p_grid_exp_max_kw=10)
     r_high = solve(OptimizerInputs(battery=_battery(eta_chg=1.0, eta_dis=1.0), **base_inputs))
     r_low = solve(OptimizerInputs(battery=_battery(eta_chg=0.8, eta_dis=0.8), **base_inputs))
-    assert r_low.savings_eur < r_high.savings_eur
-    assert r_low.savings_eur > 0  # still some arbitrage value
+    assert r_low.savings < r_high.savings
+    assert r_low.savings > 0  # still some arbitrage value
 
 
 def test_passive_cost_matches_manual() -> None:

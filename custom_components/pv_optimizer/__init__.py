@@ -33,7 +33,7 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
         p_dis_max_kw=float(data[C.CONF_BATTERY_P_DIS_MAX_KW]),
         eta_chg=float(data[C.CONF_BATTERY_ETA_CHG]),
         eta_dis=float(data[C.CONF_BATTERY_ETA_DIS]),
-        cycle_cost_eur_per_kwh=float(data[C.CONF_BATTERY_CYCLE_COST]),
+        cycle_cost_per_kwh=float(data[C.CONF_BATTERY_CYCLE_COST]),
     )
     config = PlannerConfig(
         load_power_entity=data[C.CONF_LOAD_POWER],
@@ -67,6 +67,7 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
     coord = PvOptimizerCoordinator(
         hass, config, int(data[C.CONF_UPDATE_SECONDS]),
         forecaster_opts=forecaster_opts,
+        currency=str(data.get(C.CONF_CURRENCY, C.DEFAULT_CURRENCY)),
     )
     await coord.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord

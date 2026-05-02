@@ -121,7 +121,7 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
             dt[t] * (
                 s.price_buy * p_buy[t]
                 - s.price_sell * p_sell[t]
-                + bat.cycle_cost_eur_per_kwh * (p_chg[t] + p_dis[t])
+                + bat.cycle_cost_per_kwh * (p_chg[t] + p_dis[t])
                 + eps_curt * p_curt[t]
                 + eps_cycle * (p_chg[t] + p_dis[t])
             )
@@ -160,8 +160,8 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
 
     return OptimizerResult(
         slots=plan,
-        total_cost_eur=total,
-        passive_cost_eur=passive_cost(inputs),
+        total_cost=total,
+        passive_cost=passive_cost(inputs),
         status=status_name,
         solve_time_s=solve_time,
         extras={"soc_end_kwh": float(soc_end.value() or 0.0)},
@@ -187,8 +187,8 @@ def passive_cost(inputs: OptimizerInputs) -> float:
 
 
 def aggregate_savings(result: OptimizerResult) -> float:
-    """Convenience accessor matching :pyattr:`OptimizerResult.savings_eur`."""
-    return result.savings_eur
+    """Convenience accessor matching :pyattr:`OptimizerResult.savings`."""
+    return result.savings
 
 
 def slots_summary(slots: Sequence[TariffSlot]) -> dict:

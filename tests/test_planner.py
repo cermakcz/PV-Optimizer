@@ -62,7 +62,7 @@ def _config(**overrides) -> PlannerConfig:
     bat = BatteryParams(
         capacity_kwh=10.0, soc_min_kwh=1.0, soc_max_kwh=9.0,
         p_chg_max_kw=5.0, p_dis_max_kw=5.0,
-        eta_chg=1.0, eta_dis=1.0, cycle_cost_eur_per_kwh=0.0,
+        eta_chg=1.0, eta_dis=1.0, cycle_cost_per_kwh=0.0,
     )
     return PlannerConfig(
         **ENTITY_IDS,
@@ -127,9 +127,16 @@ def test_step_happy_path_writes_setpoint_and_feedin() -> None:
 
     assert cycle.error is None
     assert cycle.result is not None and cycle.result.status == "Optimal"
-    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1.0)  # buy 1 kW
+    # LP plans to import 1 kW to cover the load, but with battery idle
+    # this is passive self-consumption — setpoint stays at 0 and the
+    # Multiplus pulls the deficit naturally.
+    first = cycle.result.slots[0]
+    assert first.p_buy_kw == pytest.approx(1.0, abs=1e-3)
+    assert first.p_chg_kw == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
     assert cycle.applied_feedin is False
-    # number.set_value + switch.turn_off both called.
+    # number.set_value(0) still issued on the first cycle (no prior state),
+    # and the feed-in switch is explicitly turned off.
     services = [(d, s) for d, s, _ in caller.calls]
     assert ("number", "set_value") in services
     assert ("switch", "turn_off") in services
@@ -163,17 +170,23 @@ def test_setpoint_within_tolerance_not_rewritten() -> None:
     assert n_after_second >= n_after_first  # sanity
 
 
-def test_pv_surplus_triggers_feedin_on() -> None:
+def test_pv_surplus_triggers_feedin_on_without_forced_setpoint() -> None:
+    # 5 kW PV against 1 kW load = 4 kW surplus. The LP wants to export it
+    # but doesn't need the battery to do so — setpoint must stay at 0
+    # (passive surplus export via the Multiplus's own logic), with feed-in on.
     pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
-                   for h in range(4)}  # 5 kWh per slot -> 5 kW
+                   for h in range(4)}
     states = _states(pv_forecast=pv_forecast)
     caller = FakeCaller()
     planner = Planner(_config(), FakeReader(states), caller)
 
     cycle = planner.step(NOW)
 
+    first = cycle.result.slots[0]
+    assert first.p_sell_kw > 0  # LP exports
+    assert first.p_dis_kw == pytest.approx(0.0, abs=1e-3)  # but not from battery
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
     assert cycle.applied_feedin is True
-    assert cycle.applied_setpoint_w < 0  # net export
     assert ("switch", "turn_on") in [(d, s) for d, s, _ in caller.calls]
 
 
@@ -206,7 +219,9 @@ def test_dict_price_format_happy_path() -> None:
     assert cycle.error is None
     assert cycle.result is not None
     assert len(cycle.result.slots) == 4  # full configured horizon used
-    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1.0)
+    # Passive load coverage (no battery transfer) — setpoint stays at 0.
+    assert cycle.result.slots[0].p_buy_kw == pytest.approx(1.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
 
 
 def test_dict_price_format_stale_now_missing_raises() -> None:
@@ -322,7 +337,8 @@ def test_dict_price_format_top_level_iso_attributes() -> None:
     assert cycle.error is None
     assert cycle.result is not None
     assert len(cycle.result.slots) == 4
-    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1.0)
+    assert cycle.result.slots[0].p_buy_kw == pytest.approx(1.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
 
 
 
@@ -343,10 +359,10 @@ class _FakeHistory:
 
 
 def test_built_in_forecaster_drives_load_when_no_entity_set() -> None:
-    # Sell price > buy price → optimizer wants to import as much as the load
-    # demands. With the forecaster reporting 2.5 kW (and zero PV) the first
-    # slot's setpoint must reflect that — proving the forecaster, not the
-    # 1 kW current-load fallback, is feeding the planner.
+    # Forecaster reports 2.5 kW (vs the 1 kW current-load fallback). With
+    # battery idle this is passive import, so the forecaster's effect is
+    # observable in the LP plan (p_buy_kw == 2.5) rather than in the
+    # setpoint, which stays 0.
     states = _states(buy=[0.10] * 24, sell=[0.05] * 24, load_w=1000.0)
     caller = FakeCaller()
     forecaster = LoadForecaster(
@@ -358,7 +374,8 @@ def test_built_in_forecaster_drives_load_when_no_entity_set() -> None:
     cycle = planner.step(NOW)
 
     assert cycle.error is None and cycle.result is not None
-    assert cycle.applied_setpoint_w == pytest.approx(2500.0, abs=1.0)
+    assert cycle.result.slots[0].p_buy_kw == pytest.approx(2.5, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
 
 
 def test_built_in_forecaster_falls_back_when_no_history() -> None:
@@ -379,8 +396,76 @@ def test_built_in_forecaster_falls_back_when_no_history() -> None:
     cycle = planner.step(NOW)
 
     assert cycle.error is None
-    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1.0)
+    assert cycle.result.slots[0].p_buy_kw == pytest.approx(1.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
 
+
+
+# ---------------------------------------------------------------------------
+# Active modes. The setpoint should be a non-zero override only when the LP
+# wants to move energy *between the battery and the grid*. Force-discharge
+# (battery → grid arbitrage) gets a negative setpoint; force-charge (grid →
+# battery, e.g. cheap-hour buying) gets a positive one.
+# ---------------------------------------------------------------------------
+
+
+def _hourly(value_at_noon: float, value_elsewhere: float) -> list[float]:
+    """24-hour price array with a distinct value at hour 12 (= NOW's slot)."""
+    out = [value_elsewhere] * 24
+    out[12] = value_at_noon
+    return out
+
+
+def test_force_discharge_writes_negative_setpoint() -> None:
+    # Slot 0 (hour 12) has a profitable sell price; the next 3 hours offer
+    # cheap re-charge. The LP should drain the battery in slot 0 and refill
+    # over the rest of the horizon — that requires *actively forcing* the
+    # export, so the setpoint must go negative.
+    # Slot-0 buy is high so the LP can't run a pure import→export arbitrage;
+    # the only way to capture the slot-0 sell price is from the battery.
+    states = _states(
+        load_w=500.0,
+        buy=_hourly(value_at_noon=5.0, value_elsewhere=0.01),
+        sell=_hourly(value_at_noon=1.0, value_elsewhere=0.0),
+    )
+    caller = FakeCaller()
+    planner = Planner(_config(), FakeReader(states), caller)
+
+    cycle = planner.step(NOW)
+
+    first = cycle.result.slots[0]
+    assert first.p_dis_kw > 1e-3 and first.p_sell_kw > 1e-3   # active discharge to grid
+    assert first.p_buy_kw == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w < -100.0                  # negative, well past dead-band
+    assert cycle.applied_setpoint_w == pytest.approx(
+        (first.p_buy_kw - first.p_sell_kw) * 1000.0, abs=1e-3,
+    )
+    assert cycle.applied_feedin is True
+
+
+def test_force_charge_writes_positive_setpoint() -> None:
+    # Slot 0 (hour 12) has effectively free buy; the next 3 hours are very
+    # expensive. The LP should fill the battery from the grid now and
+    # discharge it to cover load later — that requires *actively forcing*
+    # extra import beyond the load, so the setpoint must go positive.
+    states = _states(
+        load_w=500.0,
+        buy=_hourly(value_at_noon=0.01, value_elsewhere=5.0),
+        sell=[0.0] * 24,                      # no profitable export anywhere
+    )
+    caller = FakeCaller()
+    planner = Planner(_config(), FakeReader(states), caller)
+
+    cycle = planner.step(NOW)
+
+    first = cycle.result.slots[0]
+    assert first.p_chg_kw > 1e-3 and first.p_buy_kw > 1e-3    # active charge from grid
+    assert first.p_sell_kw == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w > 100.0                   # positive, well past dead-band
+    assert cycle.applied_setpoint_w == pytest.approx(
+        first.p_buy_kw * 1000.0, abs=1e-3,                    # p_sell == 0 here
+    )
+    assert cycle.applied_feedin is False
 
 
 # ---------------------------------------------------------------------------

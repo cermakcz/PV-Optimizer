@@ -78,31 +78,32 @@ class _PlannedFeedInSensor(_Base):
 class _ExpectedCostSensor(_Base):
     # Currency-agnostic: the planner treats prices as opaque per-kWh numbers
     # in whatever unit the user's tariff sensors report (EUR, USD, CZK, ...).
-    _attr_native_unit_of_measurement = "your_currency"
-
+    # The display label comes from the user-configured currency on the coord.
     def __init__(self, coord: PvOptimizerCoordinator) -> None:
         super().__init__(coord, "expected_cost_horizon", "Expected Cost (Horizon)")
+        self._attr_native_unit_of_measurement = coord.currency
 
     @property
     def native_value(self) -> float | None:
         c = self._cycle
-        return None if c is None or c.result is None else round(c.result.total_cost_eur, 4)
+        return None if c is None or c.result is None else round(c.result.total_cost, 4)
 
 
 class _SavingsSensor(_Base):
-    _attr_native_unit_of_measurement = "your_currency"
-
     def __init__(self, coord: PvOptimizerCoordinator) -> None:
         super().__init__(coord, "savings_vs_passive", "Savings vs Passive")
+        self._attr_native_unit_of_measurement = coord.currency
 
     @property
     def native_value(self) -> float | None:
         c = self._cycle
-        return None if c is None or c.result is None else round(c.result.savings_eur, 4)
+        return None if c is None or c.result is None else round(c.result.savings, 4)
 
 
 class _PlanSensor(_Base):
-    _attr_native_unit_of_measurement = "W"
+    # State and slot attributes are both expressed in kW so charts plotting
+    # ``state`` alongside ``slots[*].p_*_kw`` share a consistent scale.
+    _attr_native_unit_of_measurement = "kW"
 
     def __init__(self, coord: PvOptimizerCoordinator) -> None:
         super().__init__(coord, "plan", "Plan")
@@ -110,7 +111,7 @@ class _PlanSensor(_Base):
     @property
     def native_value(self) -> float | None:
         c = self._cycle
-        return None if c is None else c.applied_setpoint_w
+        return None if c is None else round(c.applied_setpoint_w / 1000.0, 3)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

@@ -21,7 +21,7 @@ class BatteryParams:
     p_dis_max_kw: float
     eta_chg: float = 0.95
     eta_dis: float = 0.95
-    cycle_cost_eur_per_kwh: float = 0.05
+    cycle_cost_per_kwh: float = 0.05    # currency/kWh of throughput
 
     def __post_init__(self) -> None:
         if self.capacity_kwh <= 0:
@@ -32,7 +32,7 @@ class BatteryParams:
             raise ValueError("power limits must be >= 0")
         if not (0.0 < self.eta_chg <= 1.0) or not (0.0 < self.eta_dis <= 1.0):
             raise ValueError("efficiencies must be in (0, 1]")
-        if self.cycle_cost_eur_per_kwh < 0:
+        if self.cycle_cost_per_kwh < 0:
             raise ValueError("cycle_cost must be >= 0")
 
 
@@ -105,15 +105,15 @@ class OptimizerResult:
     """Result of solving the LP."""
 
     slots: Sequence[SlotPlan]
-    total_cost_eur: float           # negative = net profit
-    passive_cost_eur: float         # cost of doing nothing (battery idle)
+    total_cost: float               # in user-configured currency; negative = net profit
+    passive_cost: float             # cost of doing nothing (battery idle)
     status: str                     # "Optimal", ...
     solve_time_s: float
     extras: dict = field(default_factory=dict)
 
     @property
-    def savings_eur(self) -> float:
-        return self.passive_cost_eur - self.total_cost_eur
+    def savings(self) -> float:
+        return self.passive_cost - self.total_cost
 
 
 class OptimizerError(RuntimeError):
