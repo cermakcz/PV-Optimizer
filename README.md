@@ -27,17 +27,19 @@ imports, fully covered by unit tests.
 ## Repository layout
 ```
 custom_components/pv_optimizer/
-  models.py        # Pure dataclasses (BatteryParams, OptimizerInputs, ...)
-  optimizer.py     # LP formulation + solve()
-  planner.py       # Pure read→solve→apply pipeline (testable, no HA)
-  coordinator.py   # HA DataUpdateCoordinator shim around Planner
-  config_flow.py   # Multi-step UI configuration
-  sensor.py        # Diagnostic sensors
-  const.py         # Configuration keys + defaults
-  manifest.json    # HA manifest
+  models.py            # Pure dataclasses (BatteryParams, OptimizerInputs, ...)
+  optimizer.py         # LP formulation + solve()
+  planner.py           # Pure read→solve→apply pipeline (testable, no HA)
+  load_forecaster.py   # Median-over-N-days load forecaster (testable, no HA)
+  coordinator.py       # HA DataUpdateCoordinator shim around Planner
+  config_flow.py       # Multi-step UI configuration
+  sensor.py            # Diagnostic sensors
+  const.py             # Configuration keys + defaults
+  manifest.json        # HA manifest
 tests/
   test_optimizer.py
   test_planner.py
+  test_load_forecaster.py
 PRD.md  TASKS.md
 ```
 
@@ -48,27 +50,47 @@ PRD.md  TASKS.md
 3. **Settings → Devices & Services → Add Integration → "PV Optimizer"**.
 
 ## Configuration
-Three steps in the UI:
+Four steps in the UI:
 
 | Step | What you provide |
 |---|---|
 | Entities | Sensor IDs for load, PV, grid, SoC, buy/sell prices (today + optional tomorrow), PV forecast, optional load forecast and feed-in override; plus the `number` for the Victron grid set-point and the `switch` controlling feed-in. |
-| Battery  | Usable capacity (kWh), SoC min/max %, max charge/discharge power (kW), round-trip efficiencies, **cycle cost in EUR/kWh of throughput** (≈ `battery_price / (cycles × usable_kWh × η_rt)`). |
+| Battery  | Usable capacity (kWh), SoC min/max %, max charge/discharge power (kW), round-trip efficiencies, **cycle cost in your currency / kWh of throughput** (≈ `battery_price / (cycles × usable_kWh × η_rt)`). |
 | Solver   | Slot length (default 60 min), horizon (default 24 h), update interval (default 5 min), max grid import/export (kW), set-point write tolerance (W). |
+| Load forecast | Lookback days (default 7), optional cap (kW; 0 = no cap), weekday-aware mode (default off). Skipped at runtime when an external `load_forecast_entity` was set in the Entities step. |
+
+Options flow re-exposes the **Battery + Solver + Load-forecast** knobs in a
+single combined screen (pre-filled with current values), so cycle cost,
+efficiencies, horizon, etc. can be tuned after install without re-adding the
+integration. Entity selections stay locked to the install — change them by
+removing & re-adding the integration.
+
+> Currency note: the planner is currency-agnostic. All price-related fields
+> (cycle cost in config, the cost / savings diagnostic sensors) carry the
+> placeholder unit label `your_currency` — supply tariff sensors in whatever
+> currency you use (EUR, USD, CZK, …) and the math comes out in that same
+> unit. Just keep buy price, sell price, and cycle cost in **the same**
+> currency.
 
 ### Expected attribute shapes
-- **Hourly tariff sensors** — three shapes are auto-detected:
+- **Hourly tariff sensors** — four shapes are auto-detected, tried in order:
   - `list[float]` of length 24 under the configured attribute name (default
     `today` / `tomorrow`; Nordpool/OTE legacy shape);
   - `dict[str, float]` under the configured attribute name, keyed by ISO 8601
     timestamps with timezone offset, e.g. `{"2026-05-01T06:00:00+02:00": 0.12}`;
+  - **dict under any other attribute name** — if the configured attribute
+    isn't found, the planner scans every other dict-valued attribute and
+    picks the largest one whose keys parse as ISO timestamps. This means
+    user-built template sensors can publish under whatever attribute name
+    feels natural (`prices`, `raw_today`, …) without any planner config;
   - **top-level ISO-keyed attributes** — the entity's `attributes` dict itself
     is the price map, with each hour timestamp as its own attribute key (this
     is what `spot_hodinovy_tarif` and similar plugins do). Unrelated metadata
-    keys are ignored; the configured attribute name doesn't have to match.
+    keys are ignored.
 
-  With either dict shape today's and tomorrow's hours may live on a single
-  entity or be split across today/tomorrow entities — both work.
+  With any dict shape today's and tomorrow's hours may live on a single
+  entity (e.g. one 48-entry `prices` dict) or be split across today/tomorrow
+  entities — both work.
 
   **Staleness contract (dict shapes only):** if the *current* hour's key is
   missing, the planner refuses to run and records `last_error` rather than
@@ -87,15 +109,16 @@ Three steps in the UI:
   `load_forecast_entity` disables the built-in forecaster (escape hatch).
 
 ## Diagnostic sensors
-Five sensors are created so the plan is visible in HA dashboards:
+Up to six sensors are created so the plan is visible in HA dashboards:
 
 | Entity | Meaning |
 |---|---|
 | `sensor.pv_optimizer_planned_grid_setpoint` | Current-slot set-point in W (sign = Victron convention). |
 | `sensor.pv_optimizer_planned_feed_in`       | `on`/`off` for the upcoming slot. |
-| `sensor.pv_optimizer_expected_cost_horizon` | Total expected cost over the horizon (EUR). |
-| `sensor.pv_optimizer_savings_vs_passive`    | Savings vs. doing nothing (battery idle). |
+| `sensor.pv_optimizer_expected_cost_horizon` | Total expected cost over the horizon (`your_currency`). |
+| `sensor.pv_optimizer_savings_vs_passive`    | Savings vs. doing nothing (battery idle), in `your_currency`. |
 | `sensor.pv_optimizer_plan`                  | State = next-slot set-point; full per-slot plan in attributes. |
+| `sensor.pv_optimizer_load_forecast`         | Built-in load forecaster's next-slot kW; full `kw_per_slot` and `days_used_per_slot` in attributes. Only created when the built-in forecaster is active (no `load_forecast_entity` configured). |
 
 ## Development & tests
 ```bash
@@ -108,8 +131,12 @@ The test suite runs in a plain virtualenv, **without** installing Home
 Assistant. It covers:
 - the LP formulation in `tests/test_optimizer.py`
 - the read→solve→apply planner pipeline in `tests/test_planner.py`,
-  including legacy list and timestamp-keyed dict price formats plus the
+  including legacy list, timestamp-keyed dict, alternate wrapper-attribute
+  auto-discovery, and top-level ISO-keyed price formats, plus the
   stale-data hard-failure path.
+- the median-over-N-days load forecaster in `tests/test_load_forecaster.py`,
+  including spike rejection, partial-history fallback, time-weighted bucket
+  averaging, weekday filtering, and result caching.
 
 The HA-side files (`coordinator.py`, `config_flow.py`, `sensor.py`) are
 deliberately thin shims over the pure layer; they are exercised inside a

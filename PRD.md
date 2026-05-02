@@ -50,7 +50,7 @@ HA sensor entities ──► Coordinator ──► Optimizer (pure) ──► Op
 | Battery state of charge (%) | yes | converted to kWh via configured capacity |
 | PV current power (W) | yes | informational + plan execution feedback |
 | Grid power (W, signed) | yes | informational |
-| Buy price today, hourly (EUR/kWh) | yes | `list[24]` (Nordpool-style) **or** `dict[iso_timestamp, float]` (timestamp-keyed; preferred — see §4.1) |
+| Buy price today, hourly (`your_currency`/kWh) | yes | `list[24]` (Nordpool-style) **or** `dict[iso_timestamp, float]` (timestamp-keyed; preferred — see §4.1) |
 | Buy price tomorrow, hourly | optional | same shape; if absent, the horizon is truncated to today's last known hour |
 | Sell price today, hourly | yes | may equal buy with FiT subtractor |
 | Sell price tomorrow, hourly | optional | as above |
@@ -60,17 +60,23 @@ HA sensor entities ──► Coordinator ──► Optimizer (pure) ──► Op
 
 ### 4.1 Price-attribute shapes & staleness contract
 The tariff attribute (configurable name, default `today` / `tomorrow`) may be
-any of three shapes — the planner auto-detects which is in use:
+any of four shapes — the planner auto-detects which is in use, in this order:
 
-- **`list[float]` of length 24** — legacy Nordpool/OTE shape. Indexed by hour
-  of the local day; assumed to always represent "today's" 24 hours.
+- **`list[float]` of length 24** under the configured attribute name —
+  legacy Nordpool/OTE shape. Indexed by hour of the local day; assumed to
+  always represent "today's" 24 hours.
 - **`dict[str, float]`** under the configured attribute name, keyed by ISO 8601
   timestamps with timezone offset (e.g. `"2026-05-01T06:00:00+02:00"`).
+- **Dict under any other attribute name** — if the configured attribute is
+  absent, the planner scans every other dict-valued attribute and picks the
+  largest one whose keys parse as ISO timestamps. This lets user-built
+  template sensors publish under whatever wrapper name feels natural
+  (`prices`, `raw_today`, …) without changing planner config.
 - **Top-level ISO-keyed attributes** — the entity's *entire* `attributes`
   dict carries hour-timestamp keys directly, with no wrapping attribute
   (this is what `spot_hodinovy_tarif` and similar Czech/CEE plugins do).
   Unrelated metadata keys (`unit_of_measurement`, `friendly_name`, …) are
-  ignored. The configured attribute name is irrelevant in this case.
+  ignored.
 
 The dict shapes are preferred because they carry an explicit "as-of" anchor.
 
@@ -128,16 +134,32 @@ present at all.
 | (optional) Max discharge power | `number` | As above. |
 
 ## 6. Configuration (config flow)
-Single flow, multiple steps:
-1. **Entities** — pick all sensor & control entity IDs from §4 and §5.
+Single flow, four steps:
+1. **Entities** — pick all sensor & control entity IDs from §4 and §5,
+   including the configurable price-attribute names (default `today` /
+   `tomorrow`).
 2. **Battery** — usable capacity (kWh), SoC min/max (%), max charge/discharge
-   power (kW), round-trip efficiency (%), **cycle cost (EUR/kWh throughput)**
-   computed from `battery_price / (cycles * usable_kWh * round_trip_eff)`.
+   power (kW), round-trip efficiencies (η_chg, η_dis), **cycle cost
+   (`your_currency`/kWh throughput)** ≈ `battery_price / (cycles ·
+   usable_kWh · η_rt)`.
 3. **Solver** — slot length (default 60 min), horizon (default 24 h, max 48 h),
-   update interval (default 5 min), max grid import/export (kW).
-4. **Tariffs** — fixed surcharges (distribution, taxes) added to spot buy/sell.
+   update interval (default 5 min), max grid import/export (kW), set-point
+   write tolerance (W).
+4. **Load forecast** — lookback days (default 7), optional cap (kW; 0 = off),
+   weekday-aware mode (default off). Skipped when an external
+   `load_forecast_entity` was selected in step 1.
 
-Options flow allows changing all of the above after install.
+Currency is left unspecified on purpose: the planner is currency-agnostic and
+all monetary fields use the placeholder unit `your_currency`. As long as buy
+price, sell price and cycle cost are expressed in the same currency, the
+diagnostic cost / savings sensors come out in that same currency.
+
+The options flow re-exposes the **Battery + Solver + Load-forecast** screens
+in a single combined form, pre-filled with the currently active values.
+Entity selections are install-time only — change them by removing and
+re-adding the integration. Tariff surcharges (distribution, taxes) are
+expected to live in the user's price template (e.g. a Jinja `template.sensor`
+that adds them on top of the spot price), not in the integration itself.
 
 ## 7. LP Formulation
 Discrete slots `t = 0..T-1` of length `Δt` hours. All variables ≥ 0 unless
@@ -183,13 +205,23 @@ set-point in place, log a warning, and surface a `last_error` attribute.
 ## 9. Diagnostic Sensors
 - `sensor.pv_optimizer_planned_grid_setpoint` (W, current slot)
 - `sensor.pv_optimizer_planned_feed_in` (`on`/`off`)
-- `sensor.pv_optimizer_expected_cost_horizon` (EUR)
-- `sensor.pv_optimizer_savings_vs_passive` (EUR; cost of doing nothing − optimal)
+- `sensor.pv_optimizer_expected_cost_horizon` (`your_currency`)
+- `sensor.pv_optimizer_savings_vs_passive` (`your_currency`; cost of doing nothing − optimal)
 - `sensor.pv_optimizer_plan` (state = next-slot setpoint, attributes = full plan)
+- `sensor.pv_optimizer_load_forecast` (next-slot kW; full per-slot series in
+  attributes). Only published when the built-in forecaster is active.
 
 ## 10. Testing Strategy
 - `optimizer.py` covered by deterministic unit tests with hand-designed
   scenarios (free PV, pure arbitrage, feed-in disabled, amortization, limits).
-- `coordinator.py` covered with a mocked `hass`/`State` and the real optimizer.
-- `config_flow.py` covered with `voluptuous` schema tests and mocked `hass`.
-- No live HA instance required; CI runs `pytest`.
+- `planner.py` covered end-to-end via `tests/test_planner.py` against a fake
+  state reader / service caller — exercises every supported price shape
+  (legacy list, wrapped dict, alternate wrapper auto-discovery, top-level
+  ISO-keyed) plus the stale-data hard-fail and set-point dead-band.
+- `load_forecaster.py` covered by `tests/test_load_forecaster.py` —
+  median-based spike rejection, partial-history fallback, time-weighted
+  bucket averaging, weekday filtering, result caching.
+- HA-side files (`coordinator.py`, `config_flow.py`, `sensor.py`) are thin
+  shims over the pure layer and are exercised in a live HA instance, not in
+  this repository's CI.
+- No live HA instance required for the pure-layer suite; CI runs `pytest`.
