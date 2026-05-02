@@ -58,7 +58,8 @@ DEFAULT_SOC_MIN_PCT = 10.0
 DEFAULT_SOC_MAX_PCT = 100.0
 DEFAULT_ETA_CHG = 0.95
 DEFAULT_ETA_DIS = 0.95
-DEFAULT_CYCLE_COST = 0.05  # EUR/kWh of throughput
+DEFAULT_CYCLE_COST = 0.05  # currency/kWh of throughput; tune to your currency
+                           # (typical: ~0.05 EUR, ~0.06 USD, ~1.5 CZK, etc.)
 DEFAULT_SETPOINT_TOLERANCE_W = 50.0
 DEFAULT_LOAD_FORECAST_LOOKBACK_DAYS = 7
 DEFAULT_LOAD_FORECAST_CAP_KW = 0.0   # 0 = no cap

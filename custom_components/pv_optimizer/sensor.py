@@ -76,7 +76,9 @@ class _PlannedFeedInSensor(_Base):
 
 
 class _ExpectedCostSensor(_Base):
-    _attr_native_unit_of_measurement = "EUR"
+    # Currency-agnostic: the planner treats prices as opaque per-kWh numbers
+    # in whatever unit the user's tariff sensors report (EUR, USD, CZK, ...).
+    _attr_native_unit_of_measurement = "your_currency"
 
     def __init__(self, coord: PvOptimizerCoordinator) -> None:
         super().__init__(coord, "expected_cost_horizon", "Expected Cost (Horizon)")
@@ -88,7 +90,7 @@ class _ExpectedCostSensor(_Base):
 
 
 class _SavingsSensor(_Base):
-    _attr_native_unit_of_measurement = "EUR"
+    _attr_native_unit_of_measurement = "your_currency"
 
     def __init__(self, coord: PvOptimizerCoordinator) -> None:
         super().__init__(coord, "savings_vs_passive", "Savings vs Passive")

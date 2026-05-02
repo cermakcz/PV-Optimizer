@@ -42,8 +42,8 @@ class TariffSlot:
 
     start: datetime
     duration_h: float
-    price_buy: float       # EUR/kWh, all-in (spot + surcharges + tax)
-    price_sell: float      # EUR/kWh, all-in
+    price_buy: float       # currency/kWh, all-in (spot + surcharges + tax)
+    price_sell: float      # currency/kWh, all-in
     feedin_allowed: bool = True
 
     def __post_init__(self) -> None:

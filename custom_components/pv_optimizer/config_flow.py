@@ -31,10 +31,15 @@ def _sensor(domain: str = "sensor") -> EntitySelector:
 
 def _num(min_value: float, max_value: float, step: float = 0.01,
          unit: str | None = None) -> NumberSelector:
-    return NumberSelector(NumberSelectorConfig(
-        min=min_value, max=max_value, step=step,
-        mode=NumberSelectorMode.BOX, unit_of_measurement=unit,
-    ))
+    # ``unit_of_measurement`` must be a string when present; passing ``None``
+    # fails voluptuous validation, so omit the key entirely in that case.
+    cfg: dict[str, Any] = {
+        "min": min_value, "max": max_value, "step": step,
+        "mode": NumberSelectorMode.BOX,
+    }
+    if unit is not None:
+        cfg["unit_of_measurement"] = unit
+    return NumberSelector(NumberSelectorConfig(**cfg))
 
 
 _ENTITIES_SCHEMA = vol.Schema({
@@ -68,7 +73,7 @@ _BATTERY_SCHEMA = vol.Schema({
     vol.Required(C.CONF_BATTERY_P_DIS_MAX_KW, default=5.0): _num(0.0, 100.0, 0.1, "kW"),
     vol.Required(C.CONF_BATTERY_ETA_CHG, default=C.DEFAULT_ETA_CHG): _num(0.5, 1.0, 0.01),
     vol.Required(C.CONF_BATTERY_ETA_DIS, default=C.DEFAULT_ETA_DIS): _num(0.5, 1.0, 0.01),
-    vol.Required(C.CONF_BATTERY_CYCLE_COST, default=C.DEFAULT_CYCLE_COST): _num(0.0, 1.0, 0.001, "EUR/kWh"),
+    vol.Required(C.CONF_BATTERY_CYCLE_COST, default=C.DEFAULT_CYCLE_COST): _num(0.0, 10.0, 0.001, "your_currency/kWh"),
 })
 
 
