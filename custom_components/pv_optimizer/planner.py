@@ -209,9 +209,12 @@ class Planner:
                            default_date) -> dict[datetime, float]:
         """Read one price entity.
 
-        Three shapes are accepted:
+        Four shapes are accepted, tried in order:
         * ``attributes[attr]`` is a ``dict[iso_timestamp, float]`` (wrapped),
         * ``attributes[attr]`` is a ``list[float]`` of 24 hourly prices,
+        * any *other* dict-valued attribute looks like an ISO-keyed price map
+          (auto-discovery — handles templates that publish under names like
+          ``prices`` / ``raw_today`` without requiring user config),
         * the entity exposes hour timestamps as *top-level* attribute keys
           (``attributes`` itself is the price map). This is what plugins like
           ``spot_hodinovy_tarif`` do — there is no wrapping attribute.
@@ -223,7 +226,19 @@ class Planner:
         if isinstance(raw, (list, tuple)) and raw:
             return {datetime.combine(default_date, time(hour=i)): float(v)
                     for i, v in enumerate(raw)}
-        # Fallback: hour timestamps are themselves the attribute keys.
+        # Auto-discovery: scan other dict-valued attributes for one whose keys
+        # parse as ISO timestamps. Picks the largest such map, so a stray small
+        # dict elsewhere in attributes doesn't shadow the real price map.
+        best: dict[datetime, float] = {}
+        for k, v in st.attributes.items():
+            if k == attr or not isinstance(v, dict) or not v:
+                continue
+            parsed = self._parse_iso_keyed_dict(v, lenient=True)
+            if len(parsed) > len(best):
+                best = parsed
+        if best:
+            return best
+        # Last resort: hour timestamps are themselves the attribute keys.
         scanned = self._parse_iso_keyed_dict(st.attributes, lenient=True)
         if scanned:
             return scanned

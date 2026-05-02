@@ -247,6 +247,42 @@ def test_dict_price_format_partial_horizon_truncates() -> None:
 
 
 
+def test_dict_price_format_autodiscovers_alternate_attribute_name() -> None:
+    # Realistic scenario: a user-built template publishes the price map under
+    # ``prices`` while the planner config still uses the Nordpool default
+    # ``today``. The auto-discovery step should pick the iso-keyed dict
+    # regardless of which key wraps it — no config change required.
+    today_local_midnight_utc = datetime(2026, 4, 30, 22, 0)
+    iso_buy = {
+        _prague_iso(today_local_midnight_utc + timedelta(hours=h)): 0.30
+        for h in range(24)
+    }
+    iso_sell = {k: 0.10 for k in iso_buy}
+    buy_attrs = {"prices": iso_buy, "hours_published": 24, "source": "x"}
+    sell_attrs = {"prices": iso_sell, "hours_published": 24}
+
+    raw = {
+        "sensor.soc_pct": StateView(state="50", attributes={}),
+        "sensor.load_w": StateView(state="1000", attributes={}),
+        "sensor.pv_w": StateView(state="0", attributes={}),
+        "sensor.grid_w": StateView(state="0", attributes={}),
+        "sensor.buy": StateView(state="0.30", attributes=buy_attrs),
+        "sensor.sell": StateView(state="0.10", attributes=sell_attrs),
+        "sensor.pv_forecast": StateView(state="0", attributes={"wh_hours": {
+            (NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 0.0
+            for h in range(4)
+        }}),
+    }
+    caller = FakeCaller()
+    planner = Planner(_config(), FakeReader(raw), caller)  # default attr="today"
+
+    cycle = planner.step(NOW)
+
+    assert cycle.error is None
+    assert cycle.result is not None
+    assert len(cycle.result.slots) == 4
+
+
 def test_dict_price_format_top_level_iso_attributes() -> None:
     # Some integrations (e.g. spot_hodinovy_tarif) put the hour timestamps
     # *directly* on the entity's attributes dict — there is no wrapping

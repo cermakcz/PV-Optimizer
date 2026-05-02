@@ -7,6 +7,7 @@ repository. Validation logic that does not depend on HA lives in
 """
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import voluptuous as vol
@@ -134,20 +135,49 @@ class PvOptimizerConfigFlow(config_entries.ConfigFlow, domain=_DOMAIN):
 
     @staticmethod
     def async_get_options_flow(config_entry):
-        return PvOptimizerOptionsFlow(config_entry)
+        return PvOptimizerOptionsFlow()
 
 
-# Combined schema for the options flow — solver + load-forecast knobs in one
-# screen, since options flow re-edits don't need the full multi-step UX.
-_OPTIONS_SCHEMA = _SOLVER_SCHEMA.extend(_LOAD_FORECAST_SCHEMA.schema)
+# Combined schema for the options flow — battery + solver + load-forecast knobs
+# in one screen, since options flow re-edits don't need the full multi-step UX.
+# Entity selections still require re-adding the integration.
+_OPTIONS_SCHEMA = _BATTERY_SCHEMA.extend(_SOLVER_SCHEMA.schema).extend(
+    _LOAD_FORECAST_SCHEMA.schema
+)
+
+
+def _schema_with_suggestions(schema: vol.Schema, current: dict[str, Any]) -> vol.Schema:
+    """Return a copy of ``schema`` with ``suggested_value`` set from ``current``.
+
+    Without this, opening the options flow shows the static field defaults
+    instead of the user's saved values, so saving silently resets everything.
+    Uses ``copy.copy`` + mutation rather than reconstructing markers, since
+    ``vol.Required(..., default=marker.default)`` double-wraps the default
+    factory and breaks form validation.
+    """
+    new_keys: dict[Any, Any] = {}
+    for marker, validator in schema.schema.items():
+        key = getattr(marker, "schema", marker)
+        if isinstance(marker, vol.Marker) and key in current:
+            new_marker = copy.copy(marker)
+            new_marker.description = {"suggested_value": current[key]}
+            new_keys[new_marker] = validator
+        else:
+            new_keys[marker] = validator
+    return vol.Schema(new_keys)
 
 
 class PvOptimizerOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+    # HA 2025.x makes ``OptionsFlow.config_entry`` a read-only property that the
+    # framework populates automatically; assigning to it from ``__init__`` raises
+    # ``AttributeError``. We don't need a custom init at all — the inherited one
+    # is sufficient and the framework wires ``self.config_entry`` for us.
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
-        # Entity/battery changes still require re-adding the integration.
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
-        return self.async_show_form(step_id="init", data_schema=_OPTIONS_SCHEMA)
+        current = {**self.config_entry.data, **self.config_entry.options}
+        return self.async_show_form(
+            step_id="init",
+            data_schema=_schema_with_suggestions(_OPTIONS_SCHEMA, current),
+        )
