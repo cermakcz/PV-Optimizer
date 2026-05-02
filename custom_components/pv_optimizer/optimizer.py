@@ -4,6 +4,7 @@ Pure Python, no Home Assistant imports. See PRD.md §7 for the formulation.
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Sequence
 
@@ -16,6 +17,49 @@ from .models import (
     SlotPlan,
     TariffSlot,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+# Cache the chosen solver factory across solves: discovery is non-trivial
+# (PuLP imports highspy / probes CBC binary) and the result is stable for
+# the lifetime of the process.
+_SOLVER_FACTORY = None  # type: ignore[var-annotated]
+
+
+def _make_solver() -> "pulp.LpSolver":
+    """Return an available LP solver, preferring in-process HiGHS over CBC.
+
+    HiGHS (via ``highspy``) is preferred because it ships pre-built wheels
+    for every supported Python version and runs in-process — no subprocess
+    exec, no missing-binary failure mode. CBC is kept as a fallback so an
+    install that already has a working CBC keeps using it.
+
+    Raises ``OptimizerError`` if no LP solver is available.
+    """
+    global _SOLVER_FACTORY
+    if _SOLVER_FACTORY is not None:
+        return _SOLVER_FACTORY()
+
+    candidates = (
+        ("HiGHS", lambda: pulp.HiGHS(msg=False)),
+        ("PULP_CBC_CMD", lambda: pulp.PULP_CBC_CMD(msg=False)),
+    )
+    available = set(pulp.listSolvers(onlyAvailable=True))
+    for name, factory in candidates:
+        if name not in available:
+            continue
+        try:
+            solver = factory()
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOGGER.debug("Solver %s rejected at construction: %s", name, exc)
+            continue
+        _LOGGER.info("PV Optimizer using LP solver: %s", name)
+        _SOLVER_FACTORY = factory
+        return solver
+    raise OptimizerError(
+        "No LP solver available. Install 'highspy' (preferred) or ensure the "
+        "CBC binary bundled with 'pulp' is executable on this platform."
+    )
 
 
 def solve(inputs: OptimizerInputs) -> OptimizerResult:
@@ -85,7 +129,15 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
     prob += pulp.lpSum(cost_terms)
 
     t0 = time.perf_counter()
-    status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+    try:
+        status = prob.solve(_make_solver())
+    except pulp.PulpError as exc:
+        raise OptimizerError(f"LP solver failed: {exc}") from exc
+    except OSError as exc:
+        # CBC subprocess exec failures (missing/non-executable binary,
+        # wrong-arch wheel) bubble up as OSError; surface as OptimizerError
+        # so the planner records a clean last_error instead of crashing.
+        raise OptimizerError(f"LP solver subprocess failed: {exc}") from exc
     solve_time = time.perf_counter() - t0
     status_name = pulp.LpStatus[status]
     if status_name != "Optimal":

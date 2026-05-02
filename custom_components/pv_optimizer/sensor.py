@@ -15,7 +15,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import PvOptimizerCoordinator
-from .planner import PlanCycle
+from .planner import PlanCycle, naive_utc_to_iso
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
@@ -121,7 +121,7 @@ class _PlanSensor(_Base):
             "status": c.result.status,
             "solve_time_s": round(c.result.solve_time_s, 4),
             "horizon_slots": len(c.result.slots),
-            "slots": [asdict(s) for s in c.result.slots],
+            "slots": [_slot_to_dict(s) for s in c.result.slots],
             "error": c.error,
         }
 
@@ -159,6 +159,19 @@ class _LoadForecastSensor(_Base):
             "lookback_days": fc.config.lookback_days,
             "cap_kw": fc.config.cap_kw,
             "weekday_aware": fc.config.weekday_aware,
-            "kw_per_slot": {k.isoformat(): round(v, 3) for k, v in kw.items()},
-            "days_used_per_slot": {k.isoformat(): used.get(k, 0) for k in kw},
+            "kw_per_slot": {naive_utc_to_iso(k): round(v, 3) for k, v in kw.items()},
+            "days_used_per_slot": {naive_utc_to_iso(k): used.get(k, 0) for k in kw},
         }
+
+
+def _slot_to_dict(s) -> dict[str, Any]:
+    """Serialise a SlotPlan with timezone-aware ISO timestamp.
+
+    Slot ``start`` is internally a naive-UTC datetime; we tag it with
+    ``+00:00`` so apexcharts-card and other frontends position it at the
+    correct local-time x-coordinate instead of treating the naive string
+    inconsistently.
+    """
+    d = asdict(s)
+    d["start"] = naive_utc_to_iso(s.start)
+    return d

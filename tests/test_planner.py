@@ -1,7 +1,7 @@
 """Unit tests for the planner (pure layer driving the optimizer + side effects)."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -15,6 +15,7 @@ from custom_components.pv_optimizer.planner import (
     Planner,
     PlannerConfig,
     StateView,
+    naive_utc_to_iso,
 )
 
 
@@ -379,3 +380,78 @@ def test_built_in_forecaster_falls_back_when_no_history() -> None:
 
     assert cycle.error is None
     assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1.0)
+
+
+
+# ---------------------------------------------------------------------------
+# Solver-failure surfacing. A crash inside the LP solver (e.g. PuLP raising
+# PulpError, or CBC exec'ing into FileNotFoundError) must be caught and
+# recorded as ``cycle.error`` so the coordinator stays green and the user
+# sees the problem on the diagnostic sensor instead of in the HA log as an
+# unhandled exception every 5 minutes.
+# ---------------------------------------------------------------------------
+
+
+def test_planner_surfaces_solver_oserror_as_cycle_error(monkeypatch) -> None:
+    import pulp
+
+    from custom_components.pv_optimizer import optimizer as optimizer_mod
+
+    class _BoomSolver:
+        def actualSolve(self, *_a, **_kw):
+            raise FileNotFoundError(2, "No such file or directory", "/missing/cbc")
+
+    optimizer_mod._SOLVER_FACTORY = None
+    monkeypatch.setattr(optimizer_mod, "_make_solver", lambda: _BoomSolver())
+
+    states = _states()
+    caller = FakeCaller()
+    planner = Planner(_config(), FakeReader(states), caller)
+
+    cycle = planner.step(NOW)
+
+    assert cycle.result is None
+    assert cycle.error is not None
+    assert "subprocess failed" in cycle.error
+    assert caller.calls == []  # no setpoint write on failure
+
+
+def test_planner_surfaces_solver_pulperror_as_cycle_error(monkeypatch) -> None:
+    import pulp
+
+    from custom_components.pv_optimizer import optimizer as optimizer_mod
+
+    class _BoomSolver:
+        def actualSolve(self, *_a, **_kw):
+            raise pulp.PulpError("synthetic")
+
+    optimizer_mod._SOLVER_FACTORY = None
+    monkeypatch.setattr(optimizer_mod, "_make_solver", lambda: _BoomSolver())
+
+    states = _states()
+    caller = FakeCaller()
+    planner = Planner(_config(), FakeReader(states), caller)
+
+    cycle = planner.step(NOW)
+
+    assert cycle.result is None
+    assert cycle.error is not None and "LP solver failed" in cycle.error
+
+
+
+# ---------------------------------------------------------------------------
+# Timestamp serialisation. Slot/forecast keys are naive-UTC internally;
+# ``naive_utc_to_iso`` must emit explicit ``+00:00`` so apexcharts-card and
+# similar frontends position the series at the correct local-time x-coord.
+# ---------------------------------------------------------------------------
+
+
+def test_naive_utc_to_iso_tags_naive_input_with_utc_offset() -> None:
+    iso = naive_utc_to_iso(datetime(2026, 5, 2, 15, 0))
+    assert iso == "2026-05-02T15:00:00+00:00"
+
+
+def test_naive_utc_to_iso_normalises_aware_input_to_utc() -> None:
+    prague = timezone(timedelta(hours=2))
+    iso = naive_utc_to_iso(datetime(2026, 5, 2, 17, 0, tzinfo=prague))
+    assert iso == "2026-05-02T15:00:00+00:00"

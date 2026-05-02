@@ -8,5 +8,5 @@
   "config_flow": true,
   "iot_class": "local_polling",
   "integration_type": "service",
-  "requirements": ["pulp>=2.8"]
+  "requirements": ["pulp>=2.8", "highspy>=1.7"]
 }

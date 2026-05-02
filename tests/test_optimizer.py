@@ -3,15 +3,29 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pulp
 import pytest
 
+from custom_components.pv_optimizer import optimizer as optimizer_mod
 from custom_components.pv_optimizer.models import (
     BatteryParams,
     OptimizerError,
     OptimizerInputs,
     TariffSlot,
 )
-from custom_components.pv_optimizer.optimizer import passive_cost, solve
+from custom_components.pv_optimizer.optimizer import (
+    _make_solver,
+    passive_cost,
+    solve,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_solver_cache():
+    """Each test starts with a clean solver cache so monkeypatching takes effect."""
+    optimizer_mod._SOLVER_FACTORY = None
+    yield
+    optimizer_mod._SOLVER_FACTORY = None
 
 T0 = datetime(2026, 1, 1, 0, 0, 0)
 
@@ -169,3 +183,72 @@ def test_passive_cost_matches_manual() -> None:
     inp = OptimizerInputs(slots, [0.0, 2.0], [1.0, 1.0], 5.0, bat, 10, 10)
     # Slot 0: net=+1 kW * 0.20 = 0.20; Slot 1: surplus 1 kW exported at 0.05 = -0.05
     assert passive_cost(inp) == pytest.approx(0.15, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Solver-selection coverage. The integration must not depend on the CBC
+# subprocess (which is missing on Python 3.14 + sdist installs of pulp).
+# ---------------------------------------------------------------------------
+
+
+def test_make_solver_prefers_highs_over_cbc(monkeypatch) -> None:
+    # Both available -> HiGHS wins.
+    monkeypatch.setattr(pulp, "listSolvers", lambda onlyAvailable=False: ["PULP_CBC_CMD", "HiGHS"])
+    solver = _make_solver()
+    assert type(solver).__name__ == "HiGHS"
+
+
+def test_make_solver_falls_back_to_cbc_when_highs_missing(monkeypatch) -> None:
+    monkeypatch.setattr(pulp, "listSolvers", lambda onlyAvailable=False: ["PULP_CBC_CMD"])
+    solver = _make_solver()
+    assert type(solver).__name__ == "PULP_CBC_CMD"
+
+
+def test_make_solver_raises_when_no_solver_available(monkeypatch) -> None:
+    monkeypatch.setattr(pulp, "listSolvers", lambda onlyAvailable=False: [])
+    with pytest.raises(OptimizerError, match="No LP solver available"):
+        _make_solver()
+
+
+def test_make_solver_caches_factory(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    def _list(onlyAvailable=False):
+        calls["n"] += 1
+        return ["HiGHS"]
+
+    monkeypatch.setattr(pulp, "listSolvers", _list)
+    _make_solver()
+    _make_solver()
+    _make_solver()
+    # Discovery must run only on the first call; subsequent calls re-use
+    # the cached factory.
+    assert calls["n"] == 1
+
+
+def test_solve_wraps_pulp_error_as_optimizer_error(monkeypatch) -> None:
+    """A PulpError from the underlying solver must surface as OptimizerError."""
+
+    class _BoomSolver:
+        def actualSolve(self, *_a, **_kw):
+            raise pulp.PulpError("synthetic solver crash")
+
+    monkeypatch.setattr(optimizer_mod, "_make_solver", lambda: _BoomSolver())
+    bat = _battery()
+    inp = OptimizerInputs(_slots([0.20]), [0.0], [1.0], 5.0, bat, 10, 10)
+    with pytest.raises(OptimizerError, match="LP solver failed"):
+        solve(inp)
+
+
+def test_solve_wraps_oserror_as_optimizer_error(monkeypatch) -> None:
+    """An OSError (e.g. CBC exec failure) must surface as OptimizerError too."""
+
+    class _BoomSolver:
+        def actualSolve(self, *_a, **_kw):
+            raise FileNotFoundError(2, "No such file or directory", "/missing/cbc")
+
+    monkeypatch.setattr(optimizer_mod, "_make_solver", lambda: _BoomSolver())
+    bat = _battery()
+    inp = OptimizerInputs(_slots([0.20]), [0.0], [1.0], 5.0, bat, 10, 10)
+    with pytest.raises(OptimizerError, match="LP solver subprocess failed"):
+        solve(inp)

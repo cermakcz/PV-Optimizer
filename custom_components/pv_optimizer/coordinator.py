@@ -6,6 +6,7 @@ exercised through ``tests/test_planner.py``.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -50,8 +51,13 @@ class _HassServiceCaller(ServiceCaller):
         self._hass = hass
 
     def call(self, domain: str, service: str, data: dict[str, Any]) -> None:
-        self._hass.async_create_task(
-            self._hass.services.async_call(domain, service, data, blocking=False)
+        # Planner.step runs in an executor thread, so we must schedule the
+        # service call back onto the event loop in a thread-safe way.
+        # ``hass.async_create_task`` is event-loop-only and raises in
+        # HA 2025.x when invoked from a worker thread.
+        asyncio.run_coroutine_threadsafe(
+            self._hass.services.async_call(domain, service, data, blocking=False),
+            self._hass.loop,
         )
 
 

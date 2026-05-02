@@ -8,6 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "Ondrej Cermak" }]
 dependencies = [
     "pulp>=2.8",
+    "highspy>=1.7",
 ]
 
 [project.optional-dependencies]

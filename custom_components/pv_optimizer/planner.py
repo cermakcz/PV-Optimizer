@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Protocol
 
+import pulp
+
 from .load_forecaster import LoadForecaster
 from .models import (
     BatteryParams,
@@ -99,7 +101,7 @@ class Planner:
         try:
             inputs = self._build_inputs(now)
             result = solve(inputs)
-        except (OptimizerError, ValueError, KeyError) as exc:
+        except (OptimizerError, ValueError, KeyError, pulp.PulpError, OSError) as exc:
             _LOGGER.warning("Planning step failed: %s", exc)
             cycle = PlanCycle(now=now, result=None, applied_setpoint_w=None,
                               applied_feedin=None, error=str(exc))
@@ -361,6 +363,23 @@ def _parse_iso(s: str) -> datetime:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.replace(second=0, microsecond=0)
+
+
+def naive_utc_to_iso(dt: datetime) -> str:
+    """Serialise a naive-UTC datetime as an offset-aware ISO 8601 string.
+
+    Internal slot keys are naive UTC (see ``_parse_iso``). Frontends like
+    apexcharts-card need an explicit offset to convert reliably to the
+    browser's local timezone; without one, ISO strings are interpreted
+    inconsistently across cards/browsers and series end up misaligned on
+    the x-axis. Already-aware datetimes are converted to UTC first so the
+    output is always ``...+00:00``.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat()
 
 
 def _lookup_forecast(mapping: dict[datetime, float], slot_start: datetime,
