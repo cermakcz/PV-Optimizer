@@ -1,8 +1,0 @@
-pyproject.toml
-custom_components/pv_optimizer/__init__.py
-custom_components/pv_optimizer/const.py
-pv_optimizer.egg-info/PKG-INFO
-pv_optimizer.egg-info/SOURCES.txt
-pv_optimizer.egg-info/dependency_links.txt
-pv_optimizer.egg-info/requires.txt
-pv_optimizer.egg-info/top_level.txt
