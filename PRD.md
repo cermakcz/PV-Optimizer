@@ -57,6 +57,7 @@ HA sensor entities ──► Coordinator ──► Optimizer (pure) ──► Op
 | PV power forecast, hourly (kW) | yes | e.g. `forecast.solar` |
 | Load forecast, hourly (kW) | optional | escape hatch; if unset the built-in forecaster (§4.2) is used |
 | Feed-in allowed override | optional | external switch forcing feed-in off |
+| Force PV export toggle | optional | external `switch`/`input_boolean`/`binary_sensor`; when on, opts into the active-export branch in §8.1 |
 
 ### 4.1 Price-attribute shapes & staleness contract
 The tariff attribute (configurable name, default `today` / `tomorrow`) may be
@@ -137,7 +138,8 @@ present at all.
 Single flow, four steps:
 1. **Entities** — pick all sensor & control entity IDs from §4 and §5,
    including the configurable price-attribute names (default `today` /
-   `tomorrow`).
+   `tomorrow`) and the optional feed-in override and force-PV-export
+   toggles.
 2. **Battery** — usable capacity (kWh), SoC min/max (%), max charge/discharge
    power (kW), round-trip efficiencies (η_chg, η_dis), **cycle cost
    (`your_currency`/kWh throughput)** ≈ `battery_price / (cycles ·
@@ -154,12 +156,13 @@ all monetary fields use the placeholder unit `your_currency`. As long as buy
 price, sell price and cycle cost are expressed in the same currency, the
 diagnostic cost / savings sensors come out in that same currency.
 
-The options flow re-exposes the **Battery + Solver + Load-forecast** screens
-in a single combined form, pre-filled with the currently active values.
-Entity selections are install-time only — change them by removing and
-re-adding the integration. Tariff surcharges (distribution, taxes) are
-expected to live in the user's price template (e.g. a Jinja `template.sensor`
-that adds them on top of the spot price), not in the integration itself.
+The options flow re-exposes both the **Entities** screen and the
+**Battery + Solver + Load-forecast** combined form, pre-filled with the
+currently active values, so every entity binding and parameter can be
+re-pointed after install without removing the integration. Tariff
+surcharges (distribution, taxes) are expected to live in the user's price
+template (e.g. a Jinja `template.sensor` that adds them on top of the spot
+price), not in the integration itself.
 
 ## 7. LP Formulation
 Discrete slots `t = 0..T-1` of length `Δt` hours. All variables ≥ 0 unless
@@ -187,27 +190,96 @@ are parameters.
 With `c_cycle > 0` the LP will not co-charge/discharge in the same slot, so no
 binary variables are needed and the problem stays linear.
 
-Solver: **PuLP** with the bundled CBC backend (no system deps).
+Solver: **PuLP** with HiGHS preferred (`highspy`, in-process, no subprocess
+exec, ships pre-built wheels) and the bundled CBC binary as fallback. The
+chosen backend is cached for the lifetime of the process.
 
 ## 8. Plan Execution
 Each coordinator tick:
 1. Build `OptimizerInputs` from the current HA state and forecasts.
-2. Solve the LP for `T` slots from "now".
-3. Compute target net grid power for slot 0: `net = p_buy[0] − p_sell[0]` (kW).
-4. Convert to Victron set-point in **W** with sign per §5 and call
-   `number.set_value` on the configured entity.
+2. Refine slot-0 PV against live measurements (§8.2).
+3. Solve the LP for `T` slots from "now".
+4. Decide whether slot 0 is **active** or **passive** (§8.1) and translate
+   into a Victron set-point in **W** with sign per §5; call
+   `number.set_value` on the configured entity (subject to dead-band).
 5. Toggle the feed-in switch: ON iff `p_sell[0] > ε` and global feed-in is allowed.
-6. Publish diagnostic sensors with the full plan.
+6. Project a *physical* SoC track (§8.3) for diagnostic sensors.
+7. Publish diagnostic sensors with the full plan.
 
 Failures (missing sensor, infeasible LP, write error) leave the previous
 set-point in place, log a warning, and surface a `last_error` attribute.
+
+### 8.1 Active vs passive control
+The Multiplus's native EMS already runs self-consumption (PV → load →
+battery → grid surplus, gated by the feed-in switch) when the set-point is
+0. Forcing a non-zero set-point speculatively is brittle to forecast
+error: a PV undershoot would make the inverter discharge the battery to
+defend a target it was never asked to defend. The planner therefore only
+overrides the EMS when the LP actively wants to move energy between the
+battery and the grid:
+
+| Branch | Predicate (slot 0) | Set-point |
+|---|---|---|
+| force-discharge | `p_dis > ε ∧ p_sell > ε` | `(p_buy − p_sell) · 1000` (negative) |
+| force-charge    | `p_buy > ε ∧ p_chg > ε` | `(p_buy − p_sell) · 1000` (positive) |
+| force-export *(opt-in §8.2)* | `toggle_on ∧ p_sell > ε ∧ p_chg < ε ∧ p_dis < ε` | `(p_buy − p_sell) · 1000` (negative) |
+| passive | none of the above | `0` |
+
+`ε = 1e-3 kW`, shared between control and the §8.3 projection so they
+agree on which slots are active.
+
+### 8.2 Force-PV-export & live-PV refinement
+Pure-export slots (LP wants to sell PV with the battery idle) are passive
+by default. In some scenarios the user wants the surplus pushed to the
+grid instead of self-consumed into the battery — typically when a high
+morning sell price will be followed by cheap noon recharge anyway. The
+optional `force_pv_export_entity` toggle activates the third branch above.
+
+To make force-export safe against forecast error the planner refines slot 0
+before solving:
+
+```
+pv_kw[0] := min(forecast[0], max(0, live_avg))
+```
+
+`live_avg` is a time-weighted average of the configured `pv_power_entity`
+over the last `update_seconds` (the coordinator's update cadence, mirrored
+into planner config). Recorder-backed; if no samples cover the window
+(e.g. fresh install) the forecast is used unchanged. The clamp is
+one-sided on purpose — a transient PV burst above the forecast must never
+make the LP commit to a sell that the next minute's cloud will retract.
+
+### 8.3 Physical SoC projection
+The LP's `soc_start_kwh` is bookkeeping: in passive PV-surplus slots it
+stays flat (the LP curtails what it doesn't actively transfer). To show
+the user where the battery will *physically* end up, the planner attaches
+a second SoC track `soc_physical_kwh` to every slot:
+
+- For active and force-export slots, the projection follows the LP exactly
+  (`Δsoc = Δt · (η_c · p_chg − p_dis / η_d)`; this is `0` for force-export
+  by construction).
+- For passive slots, the projection re-runs the inverter's
+  self-consumption rule: surplus PV charges the battery up to `soc_max`,
+  deficit discharges down to `soc_min`, the rest spills to grid /
+  curtailment.
+
+Plotting both tracks reveals where bookkeeping and reality diverge.
 
 ## 9. Diagnostic Sensors
 - `sensor.pv_optimizer_planned_grid_setpoint` (W, current slot)
 - `sensor.pv_optimizer_planned_feed_in` (`on`/`off`)
 - `sensor.pv_optimizer_expected_cost_horizon` (`your_currency`)
 - `sensor.pv_optimizer_savings_vs_passive` (`your_currency`; cost of doing nothing − optimal)
-- `sensor.pv_optimizer_plan` (state = next-slot setpoint, attributes = full plan)
+- `sensor.pv_optimizer_plan` — state = next-slot set-point in kW.
+  Attributes:
+  - `slots`: per-slot list with ISO-tagged `start`, `duration_h`,
+    `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `soc_start_kwh`,
+    `soc_physical_kwh`.
+  - `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh`: battery params, exposed
+    so frontend cards can compute SoC % and draw reserve / ceiling lines
+    without hardcoding.
+  - `force_pv_export_enabled`: last-read state of the §8.2 toggle.
+  - `horizon_slots`, `status`, `solve_time_s`, `error`: solver diagnostics.
 - `sensor.pv_optimizer_load_forecast` (next-slot kW; full per-slot series in
   attributes). Only published when the built-in forecaster is active.
 
@@ -217,7 +289,11 @@ set-point in place, log a warning, and surface a `last_error` attribute.
 - `planner.py` covered end-to-end via `tests/test_planner.py` against a fake
   state reader / service caller — exercises every supported price shape
   (legacy list, wrapped dict, alternate wrapper auto-discovery, top-level
-  ISO-keyed) plus the stale-data hard-fail and set-point dead-band.
+  ISO-keyed) plus the stale-data hard-fail and set-point dead-band; the
+  active vs passive split (§8.1), force-PV-export branch (§8.2) including
+  toggle-off / toggle-on / toggle-on-but-no-surplus and live-PV clamp
+  below / above / no-history cases; and the physical SoC projection
+  (§8.3) for passive surplus, force-charge, and force-export slots.
 - `load_forecaster.py` covered by `tests/test_load_forecaster.py` —
   median-based spike rejection, partial-history fallback, time-weighted
   bucket averaging, weekday filtering, result caching.

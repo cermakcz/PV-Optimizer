@@ -13,13 +13,18 @@ At every update tick the integration:
 1. Reads household load, PV power, battery SoC, hourly buy/sell tariffs, and
    PV/load forecasts from user-configured HA sensor entities.
 2. Builds an LP over a configurable horizon (default 24 h, hourly slots).
-3. Solves it with PuLP+CBC, minimising
+3. Solves it with PuLP, preferring **HiGHS** (in-process via `highspy`) and
+   falling back to the bundled CBC binary, minimising
    `Σ (price_buy·p_buy − price_sell·p_sell + cycle_cost·throughput)·Δt`
    subject to power balance, battery dynamics, SoC bounds, charge/discharge
    limits, and grid import/export limits. Battery wear is included via a
    per-kWh **cycle (amortization) cost**.
 4. Writes the optimal current-slot grid set-point (W) and feed-in switch
    state to the configured Victron-backed `number`/`switch` entities.
+   The set-point is only forced non-zero when the LP actively wants to move
+   energy between battery and grid; in passive slots it stays at 0 and the
+   inverter handles self-consumption itself (see *Active vs passive control*
+   below).
 
 The optimizer is a pure Python module (`optimizer.py`) with no Home Assistant
 imports, fully covered by unit tests.
@@ -54,7 +59,7 @@ Four steps in the UI:
 
 | Step | What you provide |
 |---|---|
-| Entities | Sensor IDs for load, PV, grid, SoC, buy/sell prices (today + optional tomorrow), PV forecast, optional load forecast and feed-in override; plus the `number` for the Victron grid set-point and the `switch` controlling feed-in. |
+| Entities | Sensor IDs for load, PV, grid, SoC, buy/sell prices (today + optional tomorrow), PV forecast, optional load forecast, optional feed-in override, optional **force-PV-export** toggle; plus the `number` for the Victron grid set-point and the `switch` controlling feed-in. |
 | Battery  | Usable capacity (kWh), SoC min/max %, max charge/discharge power (kW), round-trip efficiencies, **cycle cost in your currency / kWh of throughput** (≈ `battery_price / (cycles × usable_kWh × η_rt)`). |
 | Solver   | Slot length (default 60 min), horizon (default 24 h), update interval (default 5 min), max grid import/export (kW), set-point write tolerance (W). |
 | Load forecast | Lookback days (default 7), optional cap (kW; 0 = no cap), weekday-aware mode (default off). Skipped at runtime when an external `load_forecast_entity` was set in the Entities step. |
@@ -108,6 +113,37 @@ removing & re-adding the integration.
   contribute; needs ~4 weeks of history to be useful). Setting an external
   `load_forecast_entity` disables the built-in forecaster (escape hatch).
 
+## Active vs passive control
+The planner only overrides the inverter when the LP wants to actively move
+energy between the battery and the grid. Otherwise the set-point stays at
+**0 W** and the Multiplus runs its own self-consumption logic (PV → load →
+battery → grid surplus, gated by the feed-in switch).
+
+| LP situation in slot 0 | Set-point written | Feed-in switch |
+|---|---|---|
+| Force-discharge (`p_dis > 0 ∧ p_sell > 0`) | `(p_buy − p_sell) · 1000` (negative) | `on` |
+| Force-charge (`p_chg > 0 ∧ p_buy > 0`)     | `(p_buy − p_sell) · 1000` (positive) | `off` |
+| Pure PV export, force-export toggle **on** (battery idle) | `(p_buy − p_sell) · 1000` (negative) | `on` |
+| Anything else (PV deficit, idle, pure export with toggle **off**) | `0` | `on` iff LP wants to sell |
+
+Forcing a non-zero set-point speculatively is brittle: a PV undershoot would
+make the inverter discharge the battery to defend a target it was never
+asked to defend. Set-point = 0 hands those degrees of freedom back to the
+inverter.
+
+### Force-PV-export toggle
+The default passive behaviour means morning PV ends up charging the battery
+even when the LP would rather sell it (e.g. a high-price morning followed
+by cheap noon recharge). Wire any `switch` / `input_boolean` / `binary_sensor`
+to **Force PV export** in the options flow to opt into the third row above.
+
+When the toggle is on the planner protects against forecast error by
+clamping slot-0 PV to `min(forecast, trailing_avg)`, where the trailing
+average is computed from the recorder over the configured update interval.
+That way the LP can never speculate above measured production, and a cloud
+that drops live PV below the forecast immediately reduces the export target
+on the next planner cycle.
+
 ## Diagnostic sensors
 Up to six sensors are created so the plan is visible in HA dashboards:
 
@@ -117,8 +153,24 @@ Up to six sensors are created so the plan is visible in HA dashboards:
 | `sensor.pv_optimizer_planned_feed_in`       | `on`/`off` for the upcoming slot. |
 | `sensor.pv_optimizer_expected_cost_horizon` | Total expected cost over the horizon (`your_currency`). |
 | `sensor.pv_optimizer_savings_vs_passive`    | Savings vs. doing nothing (battery idle), in `your_currency`. |
-| `sensor.pv_optimizer_plan`                  | State = next-slot set-point; full per-slot plan in attributes. |
+| `sensor.pv_optimizer_plan`                  | State = next-slot set-point in kW; per-slot plan + battery params in attributes (see below). |
 | `sensor.pv_optimizer_load_forecast`         | Built-in load forecaster's next-slot kW; full `kw_per_slot` and `days_used_per_slot` in attributes. Only created when the built-in forecaster is active (no `load_forecast_entity` configured). |
+
+`sensor.pv_optimizer_plan` attributes:
+
+| Attribute | Meaning |
+|---|---|
+| `slots` | Per-slot list with ISO-tagged `start`, `duration_h`, `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `soc_start_kwh`, `soc_physical_kwh`. |
+| `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh` | Battery params, exposed so dashboards can compute SoC % and draw reserve / ceiling lines without hardcoding. |
+| `force_pv_export_enabled` | Mirrors the toggle's last-read value (`null` if unset, `true`/`false` otherwise). |
+| `horizon_slots`, `status`, `solve_time_s`, `error` | Solver diagnostics. |
+
+Each slot carries two SoC tracks: `soc_start_kwh` is the LP's bookkeeping
+(stays flat across passive PV-surplus slots because the LP curtails what it
+doesn't actively transfer); `soc_physical_kwh` is a planner-layer projection
+of what the inverter will actually reach, simulating self-consumption in
+passive slots and following the LP exactly in active / force-export slots.
+Plot both to see where the two diverge.
 
 ## Development & tests
 ```bash
