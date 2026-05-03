@@ -139,13 +139,21 @@ class Planner:
             self.last = cycle
             return cycle
 
+        # Read the force-export toggle once so the projection and the
+        # control branch agree on which slots are LP-driven and which fall
+        # back to inverter self-consumption.
+        force_pv_export_enabled = self._read_bool_optional(
+            self.config.force_pv_export_entity, default=False)
+
         # Augment the LP slots with a physical SoC projection. The LP
         # bookkeeping curtails surplus PV in passive slots (so soc_start_kwh
         # may stay flat across midday); the projection re-runs the inverter's
         # self-consumption rule to estimate the SoC the battery will actually
         # reach. Useful for chart overlays, not used for control.
         result = replace(result,
-                         slots=_attach_physical_soc(inputs, result.slots, _FORCE_EPS))
+                         slots=_attach_physical_soc(
+                             inputs, result.slots, _FORCE_EPS,
+                             force_pv_export_enabled=force_pv_export_enabled))
 
         # Translate the LP plan for the next slot into inverter actions.
         #
@@ -171,8 +179,6 @@ class Planner:
         first = result.slots[0]
         force_discharge = first.p_dis_kw > _FORCE_EPS and first.p_sell_kw > _FORCE_EPS
         force_charge = first.p_buy_kw > _FORCE_EPS and first.p_chg_kw > _FORCE_EPS
-        force_pv_export_enabled = self._read_bool_optional(
-            self.config.force_pv_export_entity, default=False)
         force_export = (force_pv_export_enabled
                         and first.p_sell_kw > _FORCE_EPS
                         and first.p_chg_kw < _FORCE_EPS
@@ -474,16 +480,19 @@ def _lookup_forecast(mapping: dict[datetime, float], slot_start: datetime,
 
 def _attach_physical_soc(inputs: OptimizerInputs,
                          plan_slots: list[SlotPlan],
-                         eps: float) -> list[SlotPlan]:
+                         eps: float,
+                         *,
+                         force_pv_export_enabled: bool = False) -> list[SlotPlan]:
     """Return ``plan_slots`` with ``soc_physical_kwh`` filled in.
 
     For each slot we estimate the SoC the inverter will physically reach
     at slot start, distinct from the LP's bookkeeping ``soc_start_kwh``:
 
-    * If the LP forces a battery action (force-charge or force-discharge,
-      same predicate the planner uses to decide whether to override the
+    * If the LP forces a battery action (force-charge, force-discharge, or
+      force-export — the same predicate the planner uses to override the
       inverter setpoint), the inverter follows the LP and we apply the
-      LP's own SoC update.
+      LP's own SoC update. For force-export the LP keeps the battery
+      idle (``p_chg = p_dis = 0``) so the projection stays flat too.
     * Otherwise the inverter runs in self-consumption mode (setpoint=0):
       surplus PV charges the battery up to ``soc_max``, deficit is met by
       discharging down to ``soc_min``; the rest spills to grid or is
@@ -500,8 +509,12 @@ def _attach_physical_soc(inputs: OptimizerInputs,
         load = inputs.load_kw[t]
         force_discharge = sp.p_dis_kw > eps and sp.p_sell_kw > eps
         force_charge = sp.p_buy_kw > eps and sp.p_chg_kw > eps
+        force_export = (force_pv_export_enabled
+                        and sp.p_sell_kw > eps
+                        and sp.p_chg_kw < eps
+                        and sp.p_dis_kw < eps)
         out.append(replace(sp, soc_physical_kwh=soc))
-        if force_charge or force_discharge:
+        if force_charge or force_discharge or force_export:
             dsoc = dt * (bat.eta_chg * sp.p_chg_kw - sp.p_dis_kw / bat.eta_dis)
         else:
             net = pv - load  # >0 surplus, <0 deficit, all on AC side

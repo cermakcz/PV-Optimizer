@@ -227,6 +227,29 @@ def test_physical_soc_projection_charges_in_passive_surplus() -> None:
     assert slots[1].soc_start_kwh == pytest.approx(5.0, abs=1e-3)
 
 
+def test_physical_soc_projection_follows_lp_when_force_exporting() -> None:
+    # PV surplus with force-export enabled: the inverter pushes the surplus
+    # to the grid instead of charging the battery, so the projection must
+    # stay flat (mirroring the LP's idle-battery decision) rather than
+    # ramping up via the passive self-consumption rule.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    states = _states(pv_forecast=pv_forecast)
+    states["input_boolean.force_export"] = StateView(state="on", attributes={})
+    cfg = _config(force_pv_export_entity="input_boolean.force_export")
+    cycle = Planner(cfg, FakeReader(states), FakeCaller()).step(NOW)
+    slots = cycle.result.slots
+
+    # LP keeps battery idle (p_chg = p_dis = 0) and sells the surplus; the
+    # projection must defer to that instead of inferring a passive charge.
+    for s in slots:
+        assert s.p_chg_kw == pytest.approx(0.0, abs=1e-3)
+        assert s.p_dis_kw == pytest.approx(0.0, abs=1e-3)
+    # Initial SoC = 5 kWh; with no battery action the projection stays at 5.
+    for s in slots:
+        assert s.soc_physical_kwh == pytest.approx(5.0, abs=1e-3)
+
+
 def test_physical_soc_projection_follows_lp_when_forced() -> None:
     # Same setup as ``test_force_charge_writes_positive_setpoint``: cheap
     # noon buy, expensive afterwards, no profitable export. The LP forces
