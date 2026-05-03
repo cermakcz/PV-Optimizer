@@ -47,6 +47,7 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
         sell_price_tomorrow_entity=data.get(C.CONF_SELL_PRICE_TOMORROW),
         load_forecast_entity=data.get(C.CONF_LOAD_FORECAST),
         feedin_override_entity=data.get(C.CONF_FEEDIN_OVERRIDE),
+        force_pv_export_entity=data.get(C.CONF_FORCE_PV_EXPORT),
         grid_setpoint_entity=data[C.CONF_GRID_SETPOINT],
         feedin_switch_entity=data[C.CONF_FEEDIN_SWITCH],
         battery=battery,

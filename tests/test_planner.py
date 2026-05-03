@@ -40,6 +40,19 @@ class FakeCaller:
         self.calls.append((domain, service, data))
 
 
+class FakeLiveAverager:
+    """Trivial LiveAverager that returns a configured kW value (or None)."""
+
+    def __init__(self, value: float | None) -> None:
+        self.value = value
+        self.calls: list[tuple[str, datetime, datetime]] = []
+
+    def average_kw(self, entity_id: str, since: datetime, until: datetime
+                   ) -> float | None:
+        self.calls.append((entity_id, since, until))
+        return self.value
+
+
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -513,6 +526,127 @@ def test_force_charge_writes_positive_setpoint() -> None:
         first.p_buy_kw * 1000.0, abs=1e-3,                    # p_sell == 0 here
     )
     assert cycle.applied_feedin is False
+
+
+# ---------------------------------------------------------------------------
+# Force-PV-export toggle. With the toggle on, a pure PV-surplus slot (battery
+# idle, no LP-driven battery transfer) flips from passive (setpoint = 0,
+# inverter prioritises self-consumption -> battery) to active (negative
+# setpoint, inverter exports the surplus to the grid). This is only safe
+# because slot-0 PV is clamped to ``min(forecast, live trailing avg)`` so
+# the LP can't speculate above measured production.
+# ---------------------------------------------------------------------------
+
+
+def test_force_pv_export_off_keeps_passive_setpoint() -> None:
+    # 5 kW PV vs 1 kW load surplus; toggle absent -> passive (setpoint = 0),
+    # matching the existing self-consumption behaviour.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    states = _states(pv_forecast=pv_forecast)
+    cycle = Planner(_config(), FakeReader(states), FakeCaller()).step(NOW)
+
+    first = cycle.result.slots[0]
+    assert first.p_sell_kw > 1e-3 and first.p_chg_kw < 1e-3
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    assert cycle.force_pv_export_enabled is False
+
+
+def test_force_pv_export_on_writes_negative_setpoint() -> None:
+    # Same surplus scenario, toggle on -> active export. Setpoint mirrors the
+    # LP's net grid flow (p_buy - p_sell) so the inverter pushes PV to the
+    # grid instead of charging the battery.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    states = _states(pv_forecast=pv_forecast)
+    states["input_boolean.force_export"] = StateView(state="on", attributes={})
+    cfg = _config(force_pv_export_entity="input_boolean.force_export")
+    cycle = Planner(cfg, FakeReader(states), FakeCaller()).step(NOW)
+
+    first = cycle.result.slots[0]
+    assert first.p_sell_kw > 1e-3 and first.p_chg_kw < 1e-3 and first.p_dis_kw < 1e-3
+    assert cycle.applied_setpoint_w == pytest.approx(
+        (first.p_buy_kw - first.p_sell_kw) * 1000.0, abs=1e-3,
+    )
+    assert cycle.applied_setpoint_w < -100.0
+    assert cycle.force_pv_export_enabled is True
+
+
+def test_force_pv_export_on_inactive_when_lp_doesnt_export() -> None:
+    # Toggle on but the LP has no surplus to sell (no PV, 1 kW load). The
+    # branch must remain dormant -- setpoint stays at 0.
+    states = _states()  # default: 0 PV, 1 kW load
+    states["input_boolean.force_export"] = StateView(state="on", attributes={})
+    cfg = _config(force_pv_export_entity="input_boolean.force_export")
+    cycle = Planner(cfg, FakeReader(states), FakeCaller()).step(NOW)
+
+    first = cycle.result.slots[0]
+    assert first.p_sell_kw == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    assert cycle.force_pv_export_enabled is True  # toggle read, branch idle
+
+
+# ---------------------------------------------------------------------------
+# Slot-0 PV refinement. The planner clamps the slot-0 forecast against a
+# trailing measured average so the force-export branch can't speculate above
+# real-time production. The clamp is one-sided: live > forecast must be
+# ignored, leaving the upstream forecaster's view intact.
+# ---------------------------------------------------------------------------
+
+
+def test_live_pv_average_caps_slot0_when_below_forecast() -> None:
+    # Forecast: 5 kW PV across the horizon. Live trailing average reports
+    # 1 kW (clouded over). Slot 0's PV must drop to 1 kW so the active
+    # export branch only commits to what's actually being produced; later
+    # slots stay at the forecast.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    states = _states(pv_forecast=pv_forecast)
+    states["input_boolean.force_export"] = StateView(state="on", attributes={})
+    cfg = _config(force_pv_export_entity="input_boolean.force_export")
+    averager = FakeLiveAverager(value=1.0)
+    cycle = Planner(cfg, FakeReader(states), FakeCaller(),
+                    live_averager=averager).step(NOW)
+
+    slots = cycle.result.slots
+    # Slot 0: 1 kW PV - 1 kW load = nothing left to sell; setpoint stays at 0
+    # because the force-export branch only fires when p_sell > 0.
+    assert slots[0].p_sell_kw == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    # Subsequent slots still see the forecast and export as before.
+    assert slots[1].p_sell_kw > 1e-3
+    # The averager was queried for the configured PV power entity over a
+    # window matching update_seconds.
+    assert averager.calls and averager.calls[0][0] == "sensor.pv_w"
+    window = averager.calls[0][2] - averager.calls[0][1]
+    assert window == timedelta(seconds=cfg.update_seconds)
+
+
+def test_live_pv_average_above_forecast_keeps_forecast() -> None:
+    # Live PV briefly spikes above the forecast (e.g., burst of clear sky).
+    # The clamp is one-sided -- slot 0 must stay at the forecast so the LP
+    # never speculates beyond the upstream forecaster's slot-average view.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    states = _states(pv_forecast=pv_forecast)
+    cycle = Planner(_config(), FakeReader(states), FakeCaller(),
+                    live_averager=FakeLiveAverager(value=8.0)).step(NOW)
+
+    first = cycle.result.slots[0]
+    # Slot-0 export equals the forecast surplus (5 - 1 = 4 kW), not 7 kW.
+    assert first.p_sell_kw == pytest.approx(4.0, abs=1e-3)
+
+
+def test_live_pv_average_none_keeps_forecast() -> None:
+    # No history yet (averager returns None) -- the planner must fall back
+    # to the unmodified forecast rather than zeroing PV out.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    states = _states(pv_forecast=pv_forecast)
+    cycle = Planner(_config(), FakeReader(states), FakeCaller(),
+                    live_averager=FakeLiveAverager(value=None)).step(NOW)
+
+    assert cycle.result.slots[0].p_sell_kw == pytest.approx(4.0, abs=1e-3)
 
 
 # ---------------------------------------------------------------------------

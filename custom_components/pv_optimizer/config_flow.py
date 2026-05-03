@@ -59,6 +59,9 @@ _ENTITIES_SCHEMA = vol.Schema({
     vol.Optional(C.CONF_FEEDIN_OVERRIDE): EntitySelector(
         EntitySelectorConfig(domain=["switch", "input_boolean", "binary_sensor"])
     ),
+    vol.Optional(C.CONF_FORCE_PV_EXPORT): EntitySelector(
+        EntitySelectorConfig(domain=["switch", "input_boolean", "binary_sensor"])
+    ),
     vol.Required(C.CONF_GRID_SETPOINT): EntitySelector(
         EntitySelectorConfig(domain=["number", "input_number"])
     ),

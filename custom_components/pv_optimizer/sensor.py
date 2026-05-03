@@ -118,10 +118,15 @@ class _PlanSensor(_Base):
         c = self._cycle
         if c is None or c.result is None:
             return {}
+        bat = self.coordinator.config.battery
         return {
             "status": c.result.status,
             "solve_time_s": round(c.result.solve_time_s, 4),
             "horizon_slots": len(c.result.slots),
+            "capacity_kwh": bat.capacity_kwh,
+            "soc_min_kwh": bat.soc_min_kwh,
+            "soc_max_kwh": bat.soc_max_kwh,
+            "force_pv_export_enabled": c.force_pv_export_enabled,
             "slots": [_slot_to_dict(s) for s in c.result.slots],
             "error": c.error,
         }

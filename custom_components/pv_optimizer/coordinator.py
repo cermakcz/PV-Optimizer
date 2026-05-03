@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -17,7 +17,15 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .load_forecaster import HistoryReader, LoadForecaster, LoadForecasterConfig
-from .planner import PlanCycle, Planner, PlannerConfig, ServiceCaller, StateReader, StateView
+from .planner import (
+    LiveAverager,
+    PlanCycle,
+    Planner,
+    PlannerConfig,
+    ServiceCaller,
+    StateReader,
+    StateView,
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +101,35 @@ class _HassHistoryReader(HistoryReader):
         return out
 
 
+class _HassLiveAverager(LiveAverager):
+    """Recorder-backed time-weighted average for the planner's slot-0 PV
+    refinement. Reuses :class:`_HassHistoryReader`'s W→kW contract."""
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._reader = _HassHistoryReader(hass)
+
+    def average_kw(self, entity_id: str, since: datetime, until: datetime
+                   ) -> float | None:
+        samples = self._reader.get_history(entity_id, since, until)
+        if not samples:
+            return None
+        # Time-weighted mean: each sample holds until the next, last sample
+        # holds until ``until``. ``include_start_time_state=True`` upstream
+        # guarantees the first sample is at-or-before ``since`` so the
+        # whole window is covered without extrapolation.
+        total_kwh = 0.0
+        total_h = 0.0
+        for i, (ts, kw) in enumerate(samples):
+            seg_start = max(ts, since)
+            seg_end = samples[i + 1][0] if i + 1 < len(samples) else until
+            if seg_end <= seg_start:
+                continue
+            dt_h = (seg_end - seg_start).total_seconds() / 3600.0
+            total_kwh += kw * dt_h
+            total_h += dt_h
+        return total_kwh / total_h if total_h > 0 else None
+
+
 class PvOptimizerCoordinator(DataUpdateCoordinator[PlanCycle]):
     """Periodic coordinator that runs one planner step per update."""
 
@@ -108,6 +145,13 @@ class PvOptimizerCoordinator(DataUpdateCoordinator[PlanCycle]):
         )
         # Display-only currency label; surfaced via cost/savings sensor units.
         self.currency = currency
+        # Mirror the coordinator's update cadence into the planner so the
+        # slot-0 PV trailing average uses the same window length.
+        config = replace(config, update_seconds=update_seconds)
+        # Exposed so HA-side entities (e.g. the plan sensor) can surface
+        # battery / horizon parameters as attributes for frontend charts
+        # without reaching into the planner's privates.
+        self.config = config
         self.forecaster: LoadForecaster | None = None
         # Built-in forecaster only kicks in when the user did not point to
         # an external load_forecast_entity (escape hatch contract).
@@ -126,6 +170,7 @@ class PvOptimizerCoordinator(DataUpdateCoordinator[PlanCycle]):
         self._planner = Planner(
             config, _HassStateReader(hass), _HassServiceCaller(hass),
             load_forecaster=self.forecaster,
+            live_averager=_HassLiveAverager(hass),
         )
 
     async def _async_update_data(self) -> PlanCycle:

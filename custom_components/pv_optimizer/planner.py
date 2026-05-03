@@ -49,6 +49,19 @@ class ServiceCaller(Protocol):
     def call(self, domain: str, service: str, data: dict[str, Any]) -> None: ...
 
 
+class LiveAverager(Protocol):
+    """Computes a time-weighted-average of a numeric power entity.
+
+    The planner uses this to refine slot-0 PV against live measurements,
+    so the active force-export branch responds to clouds within one
+    planner cycle instead of waiting for the upstream PV forecaster
+    (typically hourly) to refresh.
+    """
+
+    def average_kw(self, entity_id: str, since: datetime, until: datetime
+                   ) -> float | None: ...
+
+
 @dataclass(frozen=True)
 class PlannerConfig:
     # Inputs (entity IDs).
@@ -63,6 +76,7 @@ class PlannerConfig:
     sell_price_tomorrow_entity: str | None = None
     load_forecast_entity: str | None = None
     feedin_override_entity: str | None = None
+    force_pv_export_entity: str | None = None
     # Outputs (entity IDs).
     grid_setpoint_entity: str = ""
     feedin_switch_entity: str = ""
@@ -76,6 +90,10 @@ class PlannerConfig:
     slot_minutes: int = 60
     horizon_hours: int = 24
     setpoint_tolerance_w: float = 50.0
+    # Cycle cadence; doubles as the trailing window for the slot-0 PV
+    # smoothing helper so the active force-export branch reacts to clouds
+    # at the same granularity it replans.
+    update_seconds: int = 300
     # Attribute keys used to read hourly price arrays (Nordpool convention).
     price_today_attr: str = "today"
     price_tomorrow_attr: str = "tomorrow"
@@ -89,6 +107,7 @@ class PlanCycle:
     result: OptimizerResult | None
     applied_setpoint_w: float | None
     applied_feedin: bool | None
+    force_pv_export_enabled: bool | None = None
     error: str | None = None
 
 
@@ -96,11 +115,16 @@ class Planner:
     """End-to-end: read state, solve, apply setpoint + feed-in switch."""
 
     def __init__(self, config: PlannerConfig, reader: StateReader, caller: ServiceCaller,
-                 load_forecaster: LoadForecaster | None = None) -> None:
+                 load_forecaster: LoadForecaster | None = None,
+                 live_averager: LiveAverager | None = None) -> None:
         self.config = config
         self.reader = reader
         self.caller = caller
         self.load_forecaster = load_forecaster
+        # Optional. When supplied, slot-0 PV is refined via
+        # ``min(forecast, trailing_avg)`` so the active force-export branch
+        # can't speculate above measured production.
+        self.live_averager = live_averager
         self.last: PlanCycle | None = None
 
     # ---- public API ------------------------------------------------------
@@ -138,10 +162,22 @@ class Planner:
         # the inverter discharge the battery to hit a negative target it
         # was never asked to defend. Setpoint = 0 puts the inverter back
         # in charge of those degrees of freedom.
+        #
+        # Opt-in extension via ``force_pv_export_entity``: when the toggle
+        # is on, also force the setpoint when the LP wants a pure PV export
+        # (``p_sell > 0`` with the battery idle). This is only safe because
+        # ``_build_inputs`` substitutes ``min(forecast, live_avg)`` for
+        # slot-0 PV, so the LP can't speculate above measured production.
         first = result.slots[0]
         force_discharge = first.p_dis_kw > _FORCE_EPS and first.p_sell_kw > _FORCE_EPS
         force_charge = first.p_buy_kw > _FORCE_EPS and first.p_chg_kw > _FORCE_EPS
-        if force_discharge or force_charge:
+        force_pv_export_enabled = self._read_bool_optional(
+            self.config.force_pv_export_entity, default=False)
+        force_export = (force_pv_export_enabled
+                        and first.p_sell_kw > _FORCE_EPS
+                        and first.p_chg_kw < _FORCE_EPS
+                        and first.p_dis_kw < _FORCE_EPS)
+        if force_discharge or force_charge or force_export:
             setpoint_w = (first.p_buy_kw - first.p_sell_kw) * 1000.0
         else:
             setpoint_w = 0.0
@@ -157,7 +193,9 @@ class Planner:
             self._apply_feedin(feedin)
 
         cycle = PlanCycle(now=now, result=result, applied_setpoint_w=setpoint_w,
-                          applied_feedin=feedin, error=None)
+                          applied_feedin=feedin,
+                          force_pv_export_enabled=force_pv_export_enabled,
+                          error=None)
         self.last = cycle
         return cycle
 
@@ -209,6 +247,17 @@ class Planner:
             slot_starts.append(start)
 
         pv_kw = self._read_pv_forecast(cfg.pv_forecast_entity, slot_starts, slot_h)
+        # Refine slot-0 PV against a measured trailing average so the active
+        # force-export branch responds to clouds within one planner cycle.
+        # ``min(forecast, live)`` is asymmetric on purpose: we only cut the
+        # plan when reality undershoots the forecast — never speculate above
+        # the upstream forecaster's view of the slot average.
+        if pv_kw and self.live_averager is not None and cfg.pv_power_entity:
+            window = max(timedelta(seconds=cfg.update_seconds), timedelta(seconds=30))
+            live = self.live_averager.average_kw(
+                cfg.pv_power_entity, now - window, now)
+            if live is not None:
+                pv_kw[0] = min(pv_kw[0], max(0.0, live))
         load_kw = self._read_load_forecast(cfg.load_forecast_entity, slot_starts, slot_h, load_kw_now)
         soc_kwh = max(cfg.battery.soc_min_kwh,
                       min(cfg.battery.soc_max_kwh,

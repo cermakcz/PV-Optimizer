@@ -16,6 +16,7 @@ CONF_SELL_PRICE_TOMORROW = "sell_price_tomorrow_entity"
 CONF_PV_FORECAST = "pv_forecast_entity"
 CONF_LOAD_FORECAST = "load_forecast_entity"
 CONF_FEEDIN_OVERRIDE = "feedin_override_entity"
+CONF_FORCE_PV_EXPORT = "force_pv_export_entity"
 
 # --- Configuration keys: control entity ids ---
 CONF_GRID_SETPOINT = "grid_setpoint_entity"
