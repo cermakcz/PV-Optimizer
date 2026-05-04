@@ -98,6 +98,10 @@ _SOLVER_SCHEMA = vol.Schema({
     vol.Required(C.CONF_GRID_IMPORT_MAX_KW, default=25.0): _num(0.1, 200.0, 0.5, "kW"),
     vol.Required(C.CONF_GRID_EXPORT_MAX_KW, default=25.0): _num(0.0, 200.0, 0.5, "kW"),
     vol.Required(C.CONF_SETPOINT_TOLERANCE_W, default=C.DEFAULT_SETPOINT_TOLERANCE_W): _num(0.0, 5000.0, 10.0, "W"),
+    # Sell-price floor (currency/kWh). Same currency-suffix limitation as
+    # the cycle-cost field above: bare "/kWh" + the Currency field on the
+    # Battery screen for context.
+    vol.Required(C.CONF_MIN_SELL_PRICE, default=C.DEFAULT_MIN_SELL_PRICE): _num(0.0, 100.0, 0.001, "/kWh"),
 })
 
 

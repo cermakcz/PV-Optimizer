@@ -63,6 +63,10 @@ the in-repo `pytest` suite. HA-side items (`coordinator`, `config_flow`,
 - [x] Physical SoC projection (PRD §8.3): per-slot `soc_physical_kwh`
       attached to LP results — follows the LP exactly in active /
       force-export slots, simulates self-consumption in passive slots.
+- [x] Minimum sell price floor (PRD §8.4): per-slot
+      `feedin_allowed := feedin_global ∧ (price_sell ≥ min_sell_price)`,
+      enforced by the optimizer as `p_sell[t] = 0` for sub-threshold
+      slots. Default `0.0` is a backward-compatible no-op.
 - [x] Surfaces `last_error`, `last_result`, `applied_setpoint_w`,
       `last_solve_time`, `force_pv_export_enabled` on the cycle object.
 
@@ -77,6 +81,9 @@ the in-repo `pytest` suite. HA-side items (`coordinator`, `config_flow`,
 - [x] Force-PV-export toggle: off / on with surplus / on without surplus.
 - [x] Live-PV clamp: live below forecast / live above forecast / no history.
 - [x] Physical SoC projection: passive surplus, force-charge, force-export.
+- [x] Minimum sell price floor: default 0 regression no-op, floor above
+      all prices disables export horizon-wide, partial floor gates only
+      the cheap slots within the horizon.
 
 ## 7. Built-in load forecaster (`load_forecaster.py`)
 - [x] `LoadForecaster.forecast_kw(now, n_slots, slot_h)` —
@@ -126,7 +133,8 @@ the in-repo `pytest` suite. HA-side items (`coordinator`, `config_flow`,
       `extra_state_attributes`), `LoadForecastSensor`.
 - [x] `PlanSensor` attributes include `capacity_kwh`, `soc_min_kwh`,
       `soc_max_kwh` (for SoC % conversion / reserve lines in dashboards),
-      `force_pv_export_enabled` (toggle state), and per-slot
+      `force_pv_export_enabled` (toggle state),
+      `min_sell_price_per_kwh` (active floor; 0 = disabled), and per-slot
       `soc_physical_kwh` alongside `soc_start_kwh`.
 - [x] Currency-agnostic units (`your_currency`) on cost / savings sensors.
 - [x] Sensors become unavailable on solver failure / no data.

@@ -41,6 +41,7 @@ CONF_UPDATE_SECONDS = "update_seconds"
 CONF_GRID_IMPORT_MAX_KW = "grid_import_max_kw"
 CONF_GRID_EXPORT_MAX_KW = "grid_export_max_kw"
 CONF_SETPOINT_TOLERANCE_W = "setpoint_tolerance_w"
+CONF_MIN_SELL_PRICE = "min_sell_price_per_kwh"
 
 # --- Tariff surcharges (added to spot prices) ---
 CONF_BUY_SURCHARGE = "buy_surcharge_per_kwh"
@@ -68,6 +69,7 @@ DEFAULT_ETA_DIS = 0.95
 DEFAULT_CYCLE_COST = 0.05  # currency/kWh of throughput; tune to your currency
                            # (typical: ~0.05 EUR, ~0.06 USD, ~1.5 CZK, etc.)
 DEFAULT_SETPOINT_TOLERANCE_W = 50.0
+DEFAULT_MIN_SELL_PRICE = 0.0   # currency/kWh; 0 = no floor (sell whenever LP wants to)
 DEFAULT_LOAD_FORECAST_LOOKBACK_DAYS = 7
 DEFAULT_LOAD_FORECAST_CAP_KW = 0.0   # 0 = no cap
 DEFAULT_LOAD_FORECAST_WEEKDAY_AWARE = False

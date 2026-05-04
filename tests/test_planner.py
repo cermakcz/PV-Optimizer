@@ -744,3 +744,66 @@ def test_naive_utc_to_iso_normalises_aware_input_to_utc() -> None:
     prague = timezone(timedelta(hours=2))
     iso = naive_utc_to_iso(datetime(2026, 5, 2, 17, 0, tzinfo=prague))
     assert iso == "2026-05-02T15:00:00+00:00"
+
+
+
+# ---------------------------------------------------------------------------
+# Minimum sell price floor. Slots whose sell price falls below the configured
+# threshold get ``feedin_allowed=False``, which the optimizer enforces as
+# ``p_sell[t] = 0``. Default 0.0 is a no-op (any non-negative sell price
+# clears the floor) so this is opt-in and backward compatible.
+# ---------------------------------------------------------------------------
+
+
+def test_min_sell_price_default_zero_preserves_passive_export() -> None:
+    # Regression guard: with the default floor (0.0), the existing passive-
+    # surplus behaviour from test_pv_surplus_triggers_feedin_on_... must
+    # still hold. Sell price 0.10 > 0.0, so no slot is gated off.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    states = _states(pv_forecast=pv_forecast)
+    cycle = Planner(_config(), FakeReader(states), FakeCaller()).step(NOW)
+
+    first = cycle.result.slots[0]
+    assert first.p_sell_kw > 1e-3
+    assert cycle.applied_feedin is True
+
+
+def test_min_sell_price_above_all_prices_disables_export() -> None:
+    # Floor above the constant 0.10 sell price -> every slot has
+    # feedin_allowed=False -> p_sell pinned to 0 across the horizon, slot-0
+    # setpoint stays at 0, and the feed-in switch is turned off.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    states = _states(pv_forecast=pv_forecast)
+    cfg = _config(min_sell_price_per_kwh=0.20)
+    caller = FakeCaller()
+    cycle = Planner(cfg, FakeReader(states), caller).step(NOW)
+
+    assert all(s.p_sell_kw == pytest.approx(0.0, abs=1e-3) for s in cycle.result.slots)
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_feedin is False
+    assert ("switch", "turn_off") in [(d, s) for d, s, _ in caller.calls]
+
+
+def test_min_sell_price_partial_horizon_gates_only_cheap_slots() -> None:
+    # Two-tier sell price: first two slots at 0.05 (below floor), last two at
+    # 0.30 (above). With floor=0.10 the LP must keep PV in the battery during
+    # the cheap morning slots and export it in the expensive afternoon ones.
+    pv_forecast = {(NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 5000.0
+                   for h in range(4)}
+    # NOW is hour 12 and the horizon is 4 slots, so indices 12..15 of the
+    # 24-hour sell array drive the LP. Cheap-then-expensive within the
+    # horizon makes the gate observable.
+    sell = [0.30] * 12 + [0.05, 0.05, 0.30, 0.30] + [0.30] * 8
+    states = _states(pv_forecast=pv_forecast, sell=sell)
+    cfg = _config(min_sell_price_per_kwh=0.10)
+    cycle = Planner(cfg, FakeReader(states), FakeCaller()).step(NOW)
+
+    slots = cycle.result.slots
+    assert slots[0].p_sell_kw == pytest.approx(0.0, abs=1e-3)
+    assert slots[1].p_sell_kw == pytest.approx(0.0, abs=1e-3)
+    # At least one of the eligible later slots must export something.
+    assert slots[2].p_sell_kw + slots[3].p_sell_kw > 1e-3
+    # Slot 0 is gated -> feed-in switch off this cycle.
+    assert cycle.applied_feedin is False

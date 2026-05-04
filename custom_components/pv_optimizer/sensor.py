@@ -127,6 +127,7 @@ class _PlanSensor(_Base):
             "soc_min_kwh": bat.soc_min_kwh,
             "soc_max_kwh": bat.soc_max_kwh,
             "force_pv_export_enabled": c.force_pv_export_enabled,
+            "min_sell_price_per_kwh": self.coordinator.config.min_sell_price_per_kwh,
             "slots": [_slot_to_dict(s) for s in c.result.slots],
             "error": c.error,
         }

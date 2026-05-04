@@ -146,7 +146,9 @@ Single flow, four steps:
    usable_kWh · η_rt)`.
 3. **Solver** — slot length (default 60 min), horizon (default 24 h, max 48 h),
    update interval (default 5 min), max grid import/export (kW), set-point
-   write tolerance (W).
+   write tolerance (W), **minimum sell price (`your_currency`/kWh; default
+   `0`)** — slots whose all-in sell price falls below this floor are gated
+   off (see §8.4).
 4. **Load forecast** — lookback days (default 7), optional cap (kW; 0 = off),
    weekday-aware mode (default off). Skipped when an external
    `load_forecast_entity` was selected in step 1.
@@ -265,6 +267,28 @@ a second SoC track `soc_physical_kwh` to every slot:
 
 Plotting both tracks reveals where bookkeeping and reality diverge.
 
+### 8.4 Minimum sell price floor
+A user-configurable floor on the slot sell price (default `0`). For every
+slot the planner computes:
+
+```
+feedin_allowed[t] := feedin_global ∧ (price_sell[t] ≥ min_sell_price)
+```
+
+`feedin_allowed=False` is enforced by the optimizer as `p_sell[t] = 0`
+(via the per-slot `sell_ub` in §7), so a sub-threshold slot can neither
+export PV nor discharge the battery to the grid. The LP then plans
+around the lost revenue — typically by storing PV in the battery for a
+later, higher-priced slot, or by curtailing if the battery is full.
+
+When the gate fires for slot 0 the §8.1 set-point logic naturally falls
+into the passive branch (since both `p_sell` and `p_dis` are 0) and the
+feed-in switch goes off (predicate `p_sell[0] > ε` is false), which also
+prevents the inverter's native EMS from exporting at the floor price.
+Useful when the marginal sell revenue (e.g. 0.10 CZK/kWh) doesn't justify
+running the inverter at full export power. Default `0` disables the floor
+entirely (any non-negative sell price clears the gate).
+
 ## 9. Diagnostic Sensors
 - `sensor.pv_optimizer_planned_grid_setpoint` (W, current slot)
 - `sensor.pv_optimizer_planned_feed_in` (`on`/`off`)
@@ -279,6 +303,8 @@ Plotting both tracks reveals where bookkeeping and reality diverge.
     so frontend cards can compute SoC % and draw reserve / ceiling lines
     without hardcoding.
   - `force_pv_export_enabled`: last-read state of the §8.2 toggle.
+  - `min_sell_price_per_kwh`: active sell-price floor from §8.4
+    (`your_currency`/kWh; `0` = disabled).
   - `horizon_slots`, `status`, `solve_time_s`, `error`: solver diagnostics.
 - `sensor.pv_optimizer_load_forecast` (next-slot kW; full per-slot series in
   attributes). Only published when the built-in forecaster is active.
@@ -292,8 +318,11 @@ Plotting both tracks reveals where bookkeeping and reality diverge.
   ISO-keyed) plus the stale-data hard-fail and set-point dead-band; the
   active vs passive split (§8.1), force-PV-export branch (§8.2) including
   toggle-off / toggle-on / toggle-on-but-no-surplus and live-PV clamp
-  below / above / no-history cases; and the physical SoC projection
-  (§8.3) for passive surplus, force-charge, and force-export slots.
+  below / above / no-history cases; the physical SoC projection
+  (§8.3) for passive surplus, force-charge, and force-export slots; and
+  the minimum-sell-price gate (§8.4) — default zero is a regression
+  no-op, floor above all prices disables export horizon-wide, partial
+  floor gates only the cheap slots within the horizon.
 - `load_forecaster.py` covered by `tests/test_load_forecaster.py` —
   median-based spike rejection, partial-history fallback, time-weighted
   bucket averaging, weekday filtering, result caching.

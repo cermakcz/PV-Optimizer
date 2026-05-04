@@ -144,6 +144,17 @@ That way the LP can never speculate above measured production, and a cloud
 that drops live PV below the forecast immediately reduces the export target
 on the next planner cycle.
 
+### Minimum sell price
+A floor on the sell price (currency/kWh, default `0`) configurable in the
+Solver options. Slots whose all-in sell price falls **strictly below** the
+floor are treated as feed-in-disallowed for the purposes of the LP: the
+optimizer pins `p_sell[t] = 0`, so it plans to keep that PV in the battery
+for a better-priced slot (or curtails when the battery is full). When the
+gate fires for slot 0 the feed-in switch is also turned off, which stops
+the inverter's native logic from exporting at the floor price too. Useful
+when the marginal sell revenue (e.g. 0.10 CZK/kWh) doesn't justify running
+the inverter at full export power. Leave at `0` to disable the floor.
+
 ## Diagnostic sensors
 Up to six sensors are created so the plan is visible in HA dashboards:
 
@@ -163,6 +174,7 @@ Up to six sensors are created so the plan is visible in HA dashboards:
 | `slots` | Per-slot list with ISO-tagged `start`, `duration_h`, `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `soc_start_kwh`, `soc_physical_kwh`. |
 | `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh` | Battery params, exposed so dashboards can compute SoC % and draw reserve / ceiling lines without hardcoding. |
 | `force_pv_export_enabled` | Mirrors the toggle's last-read value (`null` if unset, `true`/`false` otherwise). |
+| `min_sell_price_per_kwh` | Active sell-price floor (currency/kWh; `0` = disabled). |
 | `horizon_slots`, `status`, `solve_time_s`, `error` | Solver diagnostics. |
 
 Each slot carries two SoC tracks: `soc_start_kwh` is the LP's bookkeeping

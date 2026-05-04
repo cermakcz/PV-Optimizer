@@ -56,6 +56,8 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
         slot_minutes=int(data[C.CONF_SLOT_MINUTES]),
         horizon_hours=int(data[C.CONF_HORIZON_HOURS]),
         setpoint_tolerance_w=float(data[C.CONF_SETPOINT_TOLERANCE_W]),
+        min_sell_price_per_kwh=float(data.get(C.CONF_MIN_SELL_PRICE,
+                                              C.DEFAULT_MIN_SELL_PRICE)),
     )
     cap_raw = float(data.get(C.CONF_LOAD_FORECAST_CAP_KW, C.DEFAULT_LOAD_FORECAST_CAP_KW))
     forecaster_opts = LoadForecasterOptions(

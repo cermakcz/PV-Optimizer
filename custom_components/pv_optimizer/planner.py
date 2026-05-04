@@ -90,6 +90,12 @@ class PlannerConfig:
     slot_minutes: int = 60
     horizon_hours: int = 24
     setpoint_tolerance_w: float = 50.0
+    # Per-slot floor on sell price. Slots with ``price_sell`` strictly below
+    # this value have their ``feedin_allowed`` flag forced off, which the
+    # optimizer enforces as ``p_sell[t] = 0``. Useful when the marginal sell
+    # revenue (e.g. 0.1 CZK/kWh) doesn't justify exporting at all. 0.0
+    # disables the floor entirely (any non-negative sell price is acceptable).
+    min_sell_price_per_kwh: float = 0.0
     # Cycle cadence; doubles as the trailing window for the slot-0 PV
     # smoothing helper so the active force-export branch reacts to clouds
     # at the same granularity it replans.
@@ -245,10 +251,15 @@ class Planner:
                         "(stale tariff sensor?)"
                     )
                 break  # truncate horizon at first missing future hour
+            # Per-slot sell-price floor. Sub-threshold slots get
+            # ``feedin_allowed=False`` so the optimizer pins ``p_sell=0`` and
+            # the LP plans around the lost revenue (e.g. keeps PV in the
+            # battery for a higher-price slot later in the day).
+            feedin_for_slot = feedin_global and (ps >= cfg.min_sell_price_per_kwh)
             slots.append(TariffSlot(
                 start=start, duration_h=slot_h,
                 price_buy=pb, price_sell=ps,
-                feedin_allowed=feedin_global,
+                feedin_allowed=feedin_for_slot,
             ))
             slot_starts.append(start)
 
