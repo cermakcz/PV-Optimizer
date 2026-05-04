@@ -162,51 +162,13 @@ class Planner:
                              force_pv_export_enabled=force_pv_export_enabled))
 
         # Translate the LP plan for the next slot into inverter actions.
-        #
-        # The grid setpoint should only override the inverter's natural
-        # self-consumption logic when the LP actively wants to move energy
-        # *between the battery and the grid*. In every other case
-        # (PV surplus export, PV-deficit import, idle battery) we hand
-        # control back to the inverter with setpoint = 0 — the Multiplus
-        # then runs self-consumption mode (PV → load → battery → grid)
-        # with surplus exported iff the feed-in switch is on.
-        #
-        # Forcing a non-zero setpoint when the LP doesn't intend a battery
-        # transfer is brittle to forecast error: a PV undershoot would make
-        # the inverter discharge the battery to hit a negative target it
-        # was never asked to defend. Setpoint = 0 puts the inverter back
-        # in charge of those degrees of freedom.
-        #
-        # Opt-in extension via ``force_pv_export_entity``: when the toggle
-        # is on, also force the setpoint when the LP wants a pure PV export
-        # (``p_sell > 0`` with the battery idle). This is only safe because
-        # ``_build_inputs`` substitutes ``min(forecast, live_avg)`` for
-        # slot-0 PV, so the LP can't speculate above measured production.
-        #
-        # Force-hold-import (PRD §8.6): the LP can also rationally plan to
-        # cover load purely from the grid with the battery idle (typically
-        # when the §8.5 health floor makes further discharge expensive, or
-        # when the configured ``soc_min`` sits above the inverter's BMS
-        # floor). The native EMS would still drain the battery first in
-        # that case, silently violating the plan, so we explicitly pin the
-        # grid set-point to the planned import. Always-on: when the
-        # predicate doesn't fire (e.g. battery already at hard floor) the
-        # forced positive set-point produces the same physical behaviour
-        # as set-point 0.
+        # ``setpoint_w`` is precomputed per slot by ``_attach_physical_soc``
+        # under the §8.1 active-vs-passive rules (see the rationale there)
+        # so the control path and the dashboard projection share a single
+        # source of truth for the predicates. The feed-in switch follows
+        # the simpler "LP wants to sell in slot 0" predicate.
         first = result.slots[0]
-        force_discharge = first.p_dis_kw > _FORCE_EPS and first.p_sell_kw > _FORCE_EPS
-        force_charge = first.p_buy_kw > _FORCE_EPS and first.p_chg_kw > _FORCE_EPS
-        force_export = (force_pv_export_enabled
-                        and first.p_sell_kw > _FORCE_EPS
-                        and first.p_chg_kw < _FORCE_EPS
-                        and first.p_dis_kw < _FORCE_EPS)
-        force_hold_import = (first.p_buy_kw > _FORCE_EPS
-                             and first.p_chg_kw < _FORCE_EPS
-                             and first.p_dis_kw < _FORCE_EPS)
-        if force_discharge or force_charge or force_export or force_hold_import:
-            setpoint_w = (first.p_buy_kw - first.p_sell_kw) * 1000.0
-        else:
-            setpoint_w = 0.0
+        setpoint_w = first.setpoint_w if first.setpoint_w is not None else 0.0
         feedin = first.p_sell_kw > _FORCE_EPS
 
         prev_sp = self.last.applied_setpoint_w if self.last else None
@@ -508,23 +470,59 @@ def _attach_physical_soc(inputs: OptimizerInputs,
                          eps: float,
                          *,
                          force_pv_export_enabled: bool = False) -> list[SlotPlan]:
-    """Return ``plan_slots`` with ``soc_physical_kwh`` filled in.
+    """Return ``plan_slots`` with ``soc_physical_kwh`` and ``setpoint_w``
+    filled in.
 
-    For each slot we estimate the SoC the inverter will physically reach
-    at slot start, distinct from the LP's bookkeeping ``soc_start_kwh``:
+    Both fields share the same per-slot active/passive predicates so they
+    stay in lock-step and a single function owns the §8.1 rules — slot 0's
+    ``setpoint_w`` is what the planner actually writes to the inverter,
+    and the chart series for the rest of the horizon comes from the same
+    field, so the dashboard never has to re-implement the predicates.
+
+    The grid setpoint should only override the inverter's natural self-
+    consumption logic when the LP actively wants to move energy *between
+    the battery and the grid*. In every other case (PV surplus export,
+    PV-deficit import, idle battery) we hand control back to the inverter
+    with setpoint = 0 — the Multiplus then runs self-consumption mode
+    (PV → load → battery → grid) with surplus exported iff the feed-in
+    switch is on. Forcing a non-zero setpoint when the LP doesn't intend a
+    battery transfer is brittle to forecast error: a PV undershoot would
+    make the inverter discharge the battery to hit a negative target it
+    was never asked to defend.
+
+    Two opt-in / always-on extensions punch through that default:
+
+    * Force-PV-export (PRD §8.2, opt-in via ``force_pv_export_entity``):
+      when the toggle is on, a pure-PV-export slot (``p_sell > 0`` with
+      battery idle) gets an active negative setpoint instead of being left
+      passive. Safe because ``_build_inputs`` clamps slot-0 PV to
+      ``min(forecast, live_avg)``, so the LP can't speculate above
+      measured production.
+    * Force-hold-import (PRD §8.6, always on): the LP can rationally plan
+      to cover load purely from the grid with the battery idle (typically
+      when the §8.5 health floor makes further discharge expensive, or
+      when the configured ``soc_min`` sits above the inverter's BMS
+      floor). The native EMS would still drain the battery first in that
+      case, silently violating the plan, so we explicitly pin the grid
+      setpoint to the planned import. When the predicate doesn't fire
+      (e.g. battery already at the hard floor) the forced positive
+      setpoint produces the same physical behaviour as setpoint 0.
+
+    Per-slot behaviour:
 
     * If the LP forces a battery action (force-charge, force-discharge,
-      force-export, or force-hold-import — the same predicate the planner
-      uses to override the inverter setpoint), the inverter follows the
-      LP and we apply the LP's own SoC update. For force-export and
-      force-hold-import the LP keeps the battery idle (``p_chg = p_dis
-      = 0``) so the projection stays flat too.
-    * Otherwise the inverter runs in self-consumption mode (setpoint=0):
-      surplus PV charges the battery up to ``soc_max``, deficit is met by
-      discharging down to ``soc_min``; the rest spills to grid or is
-      curtailed. This is what the Multiplus actually does between forced
-      slots, so the projected SoC tracks reality more closely than the LP
-      bookkeeping does (which curtails surplus PV in passive slots).
+      force-export, or force-hold-import), the inverter follows the LP
+      and we apply the LP's own SoC update; ``setpoint_w`` is set to
+      ``(p_buy − p_sell) · 1000``. For force-export and force-hold-import
+      the LP keeps the battery idle (``p_chg = p_dis = 0``) so the
+      projection stays flat too.
+    * Otherwise the inverter runs in self-consumption mode
+      (``setpoint_w = 0``): surplus PV charges the battery up to
+      ``soc_max``, deficit is met by discharging down to ``soc_min``; the
+      rest spills to grid or is curtailed. This is what the Multiplus
+      actually does between forced slots, so the projected SoC tracks
+      reality more closely than the LP bookkeeping does (which curtails
+      surplus PV in passive slots).
     """
     bat = inputs.battery
     soc = inputs.initial_soc_kwh
@@ -542,8 +540,10 @@ def _attach_physical_soc(inputs: OptimizerInputs,
         force_hold_import = (sp.p_buy_kw > eps
                              and sp.p_chg_kw < eps
                              and sp.p_dis_kw < eps)
-        out.append(replace(sp, soc_physical_kwh=soc))
-        if force_charge or force_discharge or force_export or force_hold_import:
+        active = force_charge or force_discharge or force_export or force_hold_import
+        setpoint_w = (sp.p_buy_kw - sp.p_sell_kw) * 1000.0 if active else 0.0
+        out.append(replace(sp, soc_physical_kwh=soc, setpoint_w=setpoint_w))
+        if active:
             dsoc = dt * (bat.eta_chg * sp.p_chg_kw - sp.p_dis_kw / bat.eta_dis)
         else:
             net = pv - load  # >0 surplus, <0 deficit, all on AC side

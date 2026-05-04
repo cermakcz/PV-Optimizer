@@ -105,6 +105,13 @@ class SlotPlan:
     self-consumption (PV→battery→export) for slots where the LP issues no
     forced setpoint. Left ``None`` by the optimizer; populated by the
     planner when wrapping the LP result.
+
+    ``setpoint_w`` is the grid set-point the planner *would* write for
+    this slot under the §8.1 active-vs-passive rules (positive = import,
+    negative = export; ``0`` = passive / hand control to the EMS). Same
+    lifecycle as ``soc_physical_kwh``: ``None`` from the optimizer,
+    populated by the planner. Useful for chart overlays so the dashboard
+    doesn't have to re-implement the predicate logic.
     """
 
     index: int
@@ -116,6 +123,7 @@ class SlotPlan:
     p_dis_kw: float
     soc_start_kwh: float
     soc_physical_kwh: float | None = None
+    setpoint_w: float | None = None
 
 
 @dataclass(frozen=True)

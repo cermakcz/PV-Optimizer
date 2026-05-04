@@ -215,7 +215,7 @@ Up to six sensors are created so the plan is visible in HA dashboards:
 
 | Attribute | Meaning |
 |---|---|
-| `slots` | Per-slot list with ISO-tagged `start`, `duration_h`, `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `soc_start_kwh`, `soc_physical_kwh`. |
+| `slots` | Per-slot list with ISO-tagged `start`, `duration_h`, `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `soc_start_kwh`, `soc_physical_kwh`, `setpoint_w`. |
 | `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh`, `soc_health_kwh` | Battery params, exposed so dashboards can compute SoC % and draw reserve / ceiling / health-floor lines without hardcoding. |
 | `low_soc_penalty_per_kwh_h` | Active dwell-penalty rate (currency/(kWh·h); `0` = disabled). |
 | `force_pv_export_enabled` | Mirrors the toggle's last-read value (`null` if unset, `true`/`false` otherwise). |
@@ -228,6 +228,14 @@ doesn't actively transfer); `soc_physical_kwh` is a planner-layer projection
 of what the inverter will actually reach, simulating self-consumption in
 passive slots and following the LP exactly in active / force-export slots.
 Plot both to see where the two diverge.
+
+`setpoint_w` is the grid set-point the planner *would* write for that slot
+under the rules in *Active vs passive control* (positive = import,
+negative = export; `0` = passive / hand control to the EMS). For the
+current slot it matches `sensor.pv_optimizer_planned_grid_setpoint`; the
+rest of the horizon is what the planner would write next if the LP plan
+holds. Use it directly as the chart series instead of re-implementing the
+predicates client-side.
 
 ## Development & tests
 ```bash

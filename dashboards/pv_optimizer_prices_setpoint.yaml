@@ -73,23 +73,6 @@ series:
     show:
       legend_value: false
     data_generator: |
-      // Mirror planner.py: only emit a non-zero setpoint when the LP wants
-      // to actively move energy between the battery and the grid, when the
-      // force-PV-export toggle is on and the LP plans a pure PV export, OR
-      // when the LP plans pure-load coverage from the grid with the battery
-      // idle (force-hold-import, PRD §8.6 — keeps the inverter's native EMS
-      // from silently draining the battery).
-      const EPS = 1e-3;
-      const fpv = entity.attributes.force_pv_export_enabled === true;
-      return (entity.attributes.slots || []).map((s) => {
-        const force_dis = s.p_dis_kw > EPS && s.p_sell_kw > EPS;
-        const force_chg = s.p_buy_kw > EPS && s.p_chg_kw > EPS;
-        const force_exp = fpv && s.p_sell_kw > EPS
-                          && s.p_chg_kw < EPS && s.p_dis_kw < EPS;
-        const force_hold = s.p_buy_kw > EPS
-                           && s.p_chg_kw < EPS && s.p_dis_kw < EPS;
-        const sp_w = (force_dis || force_chg || force_exp || force_hold)
-          ? (s.p_buy_kw - s.p_sell_kw) * 1000
-          : 0;
-        return [new Date(s.start).getTime(), Math.round(sp_w)];
-      });
+      return (entity.attributes.slots || []).map(
+        (s) => [new Date(s.start).getTime(), Math.round(s.setpoint_w)]
+      );

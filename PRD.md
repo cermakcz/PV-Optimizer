@@ -368,7 +368,11 @@ predicate so the displayed physical SoC stays flat.
   Attributes:
   - `slots`: per-slot list with ISO-tagged `start`, `duration_h`,
     `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `soc_start_kwh`,
-    `soc_physical_kwh`.
+    `soc_physical_kwh`, `setpoint_w` (the §8.1 set-point the planner
+    *would* write for that slot — slot 0 matches the realised
+    `planned_grid_setpoint`; the rest is what the planner would write
+    next if the LP plan holds, suitable as a chart series without
+    re-implementing the predicates).
   - `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh`, `soc_health_kwh`:
     battery params, exposed so frontend cards can compute SoC % and draw
     reserve / ceiling / health-floor lines without hardcoding.
