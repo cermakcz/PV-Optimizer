@@ -1,0 +1,48 @@
+type: custom:apexcharts-card
+header:
+  title: Plan vs Reality (+-24h)
+  show: true
+now:
+  show: true
+  label: Now
+graph_span: 48h
+grid_options:
+  columns: 24
+span:
+  start: hour
+  offset: "-1day"
+apex_config:
+  chart:
+    height: 260
+  annotations:
+    yaxis:
+      - "y": 0
+yaxis:
+  - decimals: 2
+    apex_config:
+      title:
+        text: kW
+series:
+  - entity: sensor.grid_power
+    name: Actual grid (measured)
+    type: area
+    color: "#cb4335"
+    unit: kW
+    extend_to: false
+    statistics:
+      type: mean
+      period: 5minute
+    opacity: 0.3
+    stroke_width: 2
+    transform: return x / 1000;
+  - entity: sensor.pv_optimizer_plan
+    name: Planned grid
+    type: line
+    color: "#cb4335"
+    opacity: 0.5
+    unit: kW
+    extend_to: false
+    stroke_width: 2
+    data_generator: |
+      return entity.attributes.slots.map(s =>
+        [new Date(s.start).getTime(), s.p_buy_kw - s.p_sell_kw]);

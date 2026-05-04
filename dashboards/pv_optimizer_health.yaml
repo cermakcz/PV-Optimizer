@@ -1,0 +1,48 @@
+type: custom:apexcharts-card
+header:
+  title: PV Optimizer — Health (7d)
+  show: true
+graph_span: 7d
+grid_options:
+  columns: 24
+apex_config:
+  chart:
+    height: 320
+  legend:
+    position: bottom
+  stroke:
+    curve: smooth
+    width: 2
+  annotations:
+    yaxis:
+      - id: 0
+yaxis:
+  - id: savings
+    decimals: 2
+    apex_config:
+      title:
+        text: CZK
+  - id: setpoint
+    opposite: true
+    decimals: 0
+    apex_config:
+      title:
+        text: W
+series:
+  - entity: sensor.pv_optimizer_savings_vs_passive
+    name: Savings vs passive (horizon)
+    color: "#27ae60"
+    type: area
+    opacity: 0.4
+    yaxis_id: savings
+  - entity: sensor.pv_optimizer_expected_cost_horizon
+    name: Expected cost (horizon)
+    color: "#e67e22"
+    type: line
+    yaxis_id: savings
+  - entity: sensor.pv_optimizer_planned_grid_setpoint
+    name: Applied setpoint
+    color: "#34495e"
+    type: line
+    yaxis_id: setpoint
+    stroke_width: 1

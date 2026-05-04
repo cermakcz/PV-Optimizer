@@ -1,0 +1,118 @@
+type: custom:apexcharts-card
+header:
+  title: PV Optimizer — Power Plan (24h)
+  show: true
+  show_states: false
+now:
+  show: true
+  label: Now
+graph_span: 24h
+span:
+  start: hour
+grid_options:
+  columns: 24
+apex_config:
+  chart:
+    height: 340
+    stacked: true
+  legend:
+    position: bottom
+  stroke:
+    width: 2
+yaxis:
+  - id: kw
+    decimals: 2
+    apex_config:
+      title:
+        text: kW
+  - id: soc
+    min: 0
+    max: 100
+    decimals: 0
+    opposite: true
+    apex_config:
+      title:
+        text: SoC (%)
+experimental:
+  hidden_by_default: true
+series:
+  - entity: sensor.pv_optimizer_solar_forecast
+    name: PV forecast
+    type: area
+    color: "#f5b041"
+    extend_to: false
+    opacity: 0.35
+    yaxis_id: kw
+    unit: kW
+    curve: stepline
+    show:
+      legend_value: false
+    data_generator: |
+      return Object.entries(entity.attributes.wh_hours || {})
+        .map(([k, v]) => [new Date(k).getTime(), Number(v) / 1000]);
+  - entity: sensor.pv_optimizer_load_forecast
+    name: Load forecast
+    type: area
+    color: "#5dade2"
+    extend_to: false
+    opacity: 0.35
+    yaxis_id: kw
+    curve: stepline
+    show:
+      legend_value: false
+    data_generator: |
+      return Object.entries(entity.attributes.kw_per_slot || {})
+        .map(([k, v]) => [new Date(k).getTime(), Number(v)]);
+  - entity: sensor.pv_optimizer_plan
+    name: Net grid (+import / -export)
+    type: column
+    color: "#cb4335"
+    extend_to: false
+    yaxis_id: kw
+    show:
+      legend_value: false
+    data_generator: |
+      return (entity.attributes.slots || []).map((s) =>
+        [new Date(s.start).getTime(), s.p_buy_kw - s.p_sell_kw]);
+  - entity: sensor.pv_optimizer_plan
+    name: Battery (+charge / -discharge)
+    type: column
+    color: "#27ae60"
+    extend_to: false
+    yaxis_id: kw
+    show:
+      legend_value: false
+    data_generator: |
+      return (entity.attributes.slots || []).map((s) =>
+        [new Date(s.start).getTime(), s.p_chg_kw - s.p_dis_kw]);
+  - entity: sensor.pv_optimizer_plan
+    name: SoC
+    type: line
+    color: "#db18cb"
+    extend_to: false
+    yaxis_id: soc
+    unit: "%"
+    curve: monotoneCubic
+    show:
+      legend_value: false
+    data_generator: |
+      const cap = entity.attributes.capacity_kwh;
+      return (entity.attributes.slots || []).map((s) =>
+        [new Date(s.start).getTime(), (s.soc_start_kwh / cap) * 100]);
+  - entity: sensor.pv_optimizer_plan
+    name: SoC (projected)
+    type: line
+    color: "#a569bd"
+    extend_to: false
+    yaxis_id: soc
+    unit: "%"
+    stroke_width: 2
+    curve: monotoneCubic
+    show:
+      legend_value: false
+      hidden_by_default: true
+    data_generator: |
+      const cap = entity.attributes.capacity_kwh;
+      return (entity.attributes.slots || [])
+        .filter(s => s.soc_physical_kwh !== null)
+        .map(s => [new Date(s.start).getTime(), (s.soc_physical_kwh / cap) * 100]);

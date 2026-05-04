@@ -1,0 +1,95 @@
+type: custom:apexcharts-card
+header:
+  title: PV Optimizer — Prices & Setpoint (24h)
+  show: true
+now:
+  show: true
+  label: Now
+graph_span: 24h
+span:
+  start: hour
+grid_options:
+  columns: 24
+apex_config:
+  chart:
+    height: 320
+  legend:
+    position: bottom
+  stroke:
+    curve: stepline
+    width: 2
+  annotations:
+    yaxis:
+      - "y": 0
+yaxis:
+  - id: price
+    min: "|-1|"
+    max: "|+1|"
+    decimals: 3
+    apex_config:
+      title:
+        text: CZK/kWh
+  - id: setpoint
+    min: "|-100|"
+    max: "|+100|"
+    opposite: true
+    decimals: 0
+    apex_config:
+      title:
+        text: W
+series:
+  - entity: sensor.pv_optimizer_buy_prices
+    name: Buy price
+    color: "#cb4335"
+    extend_to: false
+    yaxis_id: price
+    show:
+      legend_value: false
+    data_generator: |
+      const prices = (entity.attributes && entity.attributes.prices) || {};
+      return Object.entries(prices).map(
+        ([ts, v]) => [new Date(ts).getTime(), Number(v)]
+      );
+  - entity: sensor.pv_optimizer_sell_prices
+    name: Sell price
+    color: "#27ae60"
+    extend_to: false
+    yaxis_id: price
+    show:
+      legend_value: false
+    data_generator: |
+      const prices = (entity.attributes && entity.attributes.prices) || {};
+      return Object.entries(prices).map(
+        ([ts, v]) => [new Date(ts).getTime(), Number(v)]
+      );
+  - entity: sensor.pv_optimizer_plan
+    name: Planned setpoint
+    type: line
+    color: "#2169b0"
+    opacity: 0.6
+    extend_to: false
+    yaxis_id: setpoint
+    unit: W
+    show:
+      legend_value: false
+    data_generator: |
+      // Mirror planner.py: only emit a non-zero setpoint when the LP wants
+      // to actively move energy between the battery and the grid, when the
+      // force-PV-export toggle is on and the LP plans a pure PV export, OR
+      // when the LP plans pure-load coverage from the grid with the battery
+      // idle (force-hold-import, PRD §8.6 — keeps the inverter's native EMS
+      // from silently draining the battery).
+      const EPS = 1e-3;
+      const fpv = entity.attributes.force_pv_export_enabled === true;
+      return (entity.attributes.slots || []).map((s) => {
+        const force_dis = s.p_dis_kw > EPS && s.p_sell_kw > EPS;
+        const force_chg = s.p_buy_kw > EPS && s.p_chg_kw > EPS;
+        const force_exp = fpv && s.p_sell_kw > EPS
+                          && s.p_chg_kw < EPS && s.p_dis_kw < EPS;
+        const force_hold = s.p_buy_kw > EPS
+                           && s.p_chg_kw < EPS && s.p_dis_kw < EPS;
+        const sp_w = (force_dis || force_chg || force_exp || force_hold)
+          ? (s.p_buy_kw - s.p_sell_kw) * 1000
+          : 0;
+        return [new Date(s.start).getTime(), Math.round(sp_w)];
+      });
