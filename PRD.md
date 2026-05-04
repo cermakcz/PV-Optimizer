@@ -143,7 +143,10 @@ Single flow, four steps:
 2. **Battery** — usable capacity (kWh), SoC min/max (%), max charge/discharge
    power (kW), round-trip efficiencies (η_chg, η_dis), **cycle cost
    (`your_currency`/kWh throughput)** ≈ `battery_price / (cycles ·
-   usable_kWh · η_rt)`.
+   usable_kWh · η_rt)`, **soft SoC health floor (%; default = SoC min,
+   i.e. disabled)** and **low-SoC dwell penalty
+   (`your_currency`/(kWh·h); default `0`)** — together they implement
+   the §8.5 soft floor.
 3. **Solver** — slot length (default 60 min), horizon (default 24 h, max 48 h),
    update interval (default 5 min), max grid import/export (kW), set-point
    write tolerance (W), **minimum sell price (`your_currency`/kWh; default
@@ -187,10 +190,14 @@ are parameters.
 **Objective (minimize)**
 ```
 Σ_t Δt · [ price_buy[t]·p_buy[t] − price_sell[t]·p_sell[t]
-           + c_cycle·(p_chg[t] + p_dis[t]) ]
+           + c_cycle·(p_chg[t] + p_dis[t])
+           + c_low_soc·deficit[t] ]
 ```
 With `c_cycle > 0` the LP will not co-charge/discharge in the same slot, so no
-binary variables are needed and the problem stays linear.
+binary variables are needed and the problem stays linear. The optional
+`deficit[t] ≥ max(0, soc_health − soc[t])` slack and its rate `c_low_soc`
+implement the §8.5 soft health floor; both default off (`c_low_soc = 0`,
+`soc_health = soc_min`) so the term vanishes for upgrading users.
 
 Solver: **PuLP** with HiGHS preferred (`highspy`, in-process, no subprocess
 exec, ships pre-built wheels) and the bundled CBC binary as fallback. The
@@ -225,6 +232,7 @@ battery and the grid:
 | force-discharge | `p_dis > ε ∧ p_sell > ε` | `(p_buy − p_sell) · 1000` (negative) |
 | force-charge    | `p_buy > ε ∧ p_chg > ε` | `(p_buy − p_sell) · 1000` (positive) |
 | force-export *(opt-in §8.2)* | `toggle_on ∧ p_sell > ε ∧ p_chg < ε ∧ p_dis < ε` | `(p_buy − p_sell) · 1000` (negative) |
+| force-hold-import *(§8.6)* | `p_buy > ε ∧ p_chg < ε ∧ p_dis < ε` | `(p_buy − p_sell) · 1000` (positive) |
 | passive | none of the above | `0` |
 
 `ε = 1e-3 kW`, shared between control and the §8.3 projection so they
@@ -257,9 +265,9 @@ stays flat (the LP curtails what it doesn't actively transfer). To show
 the user where the battery will *physically* end up, the planner attaches
 a second SoC track `soc_physical_kwh` to every slot:
 
-- For active and force-export slots, the projection follows the LP exactly
-  (`Δsoc = Δt · (η_c · p_chg − p_dis / η_d)`; this is `0` for force-export
-  by construction).
+- For active, force-export, and force-hold-import slots, the projection
+  follows the LP exactly (`Δsoc = Δt · (η_c · p_chg − p_dis / η_d)`; this
+  is `0` for force-export and force-hold-import by construction).
 - For passive slots, the projection re-runs the inverter's
   self-consumption rule: surplus PV charges the battery up to `soc_max`,
   deficit discharges down to `soc_min`, the rest spills to grid /
@@ -289,6 +297,68 @@ Useful when the marginal sell revenue (e.g. 0.10 CZK/kWh) doesn't justify
 running the inverter at full export power. Default `0` disables the floor
 entirely (any non-negative sell price clears the gate).
 
+### 8.5 Soft SoC health floor
+The hard `soc_min` bound prevents the LP from going below the inverter /
+chemistry safety floor, but says nothing about *dwelling* there. Without
+further input the LP happily drains to `soc_min` mid-afternoon and parks
+the battery at the bottom for 18 hours if the next day's prices don't
+beat today's; this is fine for revenue but bad for calendar aging,
+particularly on NMC and to a lesser extent LFP.
+
+Two opt-in battery parameters add a soft floor *above* `soc_min`:
+
+| Parameter | Default | Unit | Meaning |
+|---|---|---|---|
+| `soc_health_pct` | `soc_min_pct` | % | SoC the LP is encouraged to stay above |
+| `low_soc_penalty_per_kwh_h` | `0` | currency / (kWh·h) | dwell-cost rate below the floor |
+
+Mechanics: per slot the LP gains a slack `deficit[t] ≥ max(0,
+soc_health − soc[t])` (and an equivalent `deficit_end` on `soc_end`),
+priced into the objective at `Δt · c_low_soc · deficit[t]`. The LP can
+still dip below the floor — that's the *soft* part — but only when the
+slot's marginal economic gain (sell revenue, displaced buy, etc.) beats
+the cumulative penalty of the resulting low-SoC dwell over the rest of
+the horizon. A typical configuration (`soc_health = 40 %`,
+`c_low_soc = 0.5 CZK/(kWh·h)`) penalises a 1 kWh shortfall at ~0.5 CZK/h,
+enough to nudge the LP to recharge during cheap hours, weak enough to
+yield to a real evening peak.
+
+Defaults are deliberately a regression no-op: with `soc_health = soc_min`
+or `c_low_soc = 0` the slack variables and penalty term aren't created
+at all (`health_active = False` short-circuits the LP construction).
+
+### 8.6 Force-hold-import
+The §8.1 baseline rule "passive when the LP isn't moving energy between
+the battery and the grid" implicitly assumes that the inverter's native
+EMS, given set-point `0`, does the same thing the LP planned. That holds
+for PV-surplus slots (both prefer self-consumption) but breaks down in
+two cases where the LP plans pure grid coverage of the load with the
+battery idle:
+
+1. The §8.5 health floor (or any near-floor condition) makes further
+   discharge expensive enough that the LP would rather buy from the grid
+   — but the inverter's EMS doesn't know about that penalty and drains
+   the battery anyway.
+2. The configured `soc_min` sits above the inverter's BMS floor (e.g.
+   reserve set to 20 % when the BMS allows 10 %); the LP respects
+   `soc_min`, the EMS doesn't.
+
+In both cases passive set-point `0` causes the inverter to silently
+violate the plan. The fourth branch in the §8.1 table fixes this:
+
+```
+force_hold_import := p_buy > ε ∧ p_chg < ε ∧ p_dis < ε
+                  → set-point := (p_buy − p_sell) · 1000
+```
+
+The set-point pins the grid draw to the LP's planned import (positive,
+typically tracking load), which forces the inverter to cover the load
+from the grid and leaves the battery idle. Always-on, no toggle: when
+the predicate doesn't fire (e.g. battery already at hard floor with no
+arbitrage to defend) the forced positive set-point produces the same
+physical behaviour as set-point `0`. The §8.3 projection mirrors the
+predicate so the displayed physical SoC stays flat.
+
 ## 9. Diagnostic Sensors
 - `sensor.pv_optimizer_planned_grid_setpoint` (W, current slot)
 - `sensor.pv_optimizer_planned_feed_in` (`on`/`off`)
@@ -299,9 +369,11 @@ entirely (any non-negative sell price clears the gate).
   - `slots`: per-slot list with ISO-tagged `start`, `duration_h`,
     `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `soc_start_kwh`,
     `soc_physical_kwh`.
-  - `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh`: battery params, exposed
-    so frontend cards can compute SoC % and draw reserve / ceiling lines
-    without hardcoding.
+  - `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh`, `soc_health_kwh`:
+    battery params, exposed so frontend cards can compute SoC % and draw
+    reserve / ceiling / health-floor lines without hardcoding.
+  - `low_soc_penalty_per_kwh_h`: active dwell-penalty rate from §8.5
+    (`your_currency`/(kWh·h); `0` = disabled).
   - `force_pv_export_enabled`: last-read state of the §8.2 toggle.
   - `min_sell_price_per_kwh`: active sell-price floor from §8.4
     (`your_currency`/kWh; `0` = disabled).
@@ -322,7 +394,10 @@ entirely (any non-negative sell price clears the gate).
   (§8.3) for passive surplus, force-charge, and force-export slots; and
   the minimum-sell-price gate (§8.4) — default zero is a regression
   no-op, floor above all prices disables export horizon-wide, partial
-  floor gates only the cheap slots within the horizon.
+  floor gates only the cheap slots within the horizon; the soft SoC
+  health floor (§8.5) — default penalty zero is a regression no-op,
+  cheap charge slot pulls SoC up to the floor, strong sell opportunity
+  still allowed to dip below it.
 - `load_forecaster.py` covered by `tests/test_load_forecaster.py` —
   median-based spike rejection, partial-history fallback, time-weighted
   bucket averaging, weekday filtering, result caching.

@@ -1,6 +1,7 @@
 """Unit tests for the planner (pure layer driving the optimizer + side effects)."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -140,13 +141,14 @@ def test_step_happy_path_writes_setpoint_and_feedin() -> None:
 
     assert cycle.error is None
     assert cycle.result is not None and cycle.result.status == "Optimal"
-    # LP plans to import 1 kW to cover the load, but with battery idle
-    # this is passive self-consumption — setpoint stays at 0 and the
-    # Multiplus pulls the deficit naturally.
+    # LP plans to import 1 kW to cover the load with the battery idle.
+    # Force-hold-import (PRD §8.6) pins the grid set-point to the planned
+    # import so the inverter doesn't silently drain the battery instead.
     first = cycle.result.slots[0]
     assert first.p_buy_kw == pytest.approx(1.0, abs=1e-3)
     assert first.p_chg_kw == pytest.approx(0.0, abs=1e-3)
-    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    assert first.p_dis_kw == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1e-3)
     assert cycle.applied_feedin is False
     # number.set_value(0) still issued on the first cycle (no prior state),
     # and the feed-in switch is explicitly turned off.
@@ -302,9 +304,11 @@ def test_dict_price_format_happy_path() -> None:
     assert cycle.error is None
     assert cycle.result is not None
     assert len(cycle.result.slots) == 4  # full configured horizon used
-    # Passive load coverage (no battery transfer) — setpoint stays at 0.
+    # Load coverage with battery idle — force-hold-import (PRD §8.6) pins
+    # the set-point to the planned import so the EMS doesn't drain the
+    # battery instead.
     assert cycle.result.slots[0].p_buy_kw == pytest.approx(1.0, abs=1e-3)
-    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1e-3)
 
 
 def test_dict_price_format_stale_now_missing_raises() -> None:
@@ -421,7 +425,9 @@ def test_dict_price_format_top_level_iso_attributes() -> None:
     assert cycle.result is not None
     assert len(cycle.result.slots) == 4
     assert cycle.result.slots[0].p_buy_kw == pytest.approx(1.0, abs=1e-3)
-    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    # Force-hold-import (PRD §8.6): pure-load coverage gets a positive
+    # set-point so the EMS doesn't drain the battery instead.
+    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1e-3)
 
 
 
@@ -443,9 +449,8 @@ class _FakeHistory:
 
 def test_built_in_forecaster_drives_load_when_no_entity_set() -> None:
     # Forecaster reports 2.5 kW (vs the 1 kW current-load fallback). With
-    # battery idle this is passive import, so the forecaster's effect is
-    # observable in the LP plan (p_buy_kw == 2.5) rather than in the
-    # setpoint, which stays 0.
+    # battery idle this is force-hold-import (PRD §8.6) — the LP's
+    # forecaster-driven import target is mirrored 1:1 in the set-point.
     states = _states(buy=[0.10] * 24, sell=[0.05] * 24, load_w=1000.0)
     caller = FakeCaller()
     forecaster = LoadForecaster(
@@ -458,12 +463,13 @@ def test_built_in_forecaster_drives_load_when_no_entity_set() -> None:
 
     assert cycle.error is None and cycle.result is not None
     assert cycle.result.slots[0].p_buy_kw == pytest.approx(2.5, abs=1e-3)
-    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(2500.0, abs=1e-3)
 
 
 def test_built_in_forecaster_falls_back_when_no_history() -> None:
     # No history at all → forecaster returns 0 days_used, planner falls back
-    # to the current-load reading (1 kW).
+    # to the current-load reading (1 kW). Force-hold-import pins set-point
+    # to that import.
     states = _states(buy=[0.10] * 24, sell=[0.05] * 24, load_w=1000.0)
     caller = FakeCaller()
 
@@ -480,7 +486,7 @@ def test_built_in_forecaster_falls_back_when_no_history() -> None:
 
     assert cycle.error is None
     assert cycle.result.slots[0].p_buy_kw == pytest.approx(1.0, abs=1e-3)
-    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1e-3)
 
 
 
@@ -597,7 +603,8 @@ def test_force_pv_export_on_writes_negative_setpoint() -> None:
 
 def test_force_pv_export_on_inactive_when_lp_doesnt_export() -> None:
     # Toggle on but the LP has no surplus to sell (no PV, 1 kW load). The
-    # branch must remain dormant -- setpoint stays at 0.
+    # force-export branch must remain dormant -- the LP plans pure import
+    # for the load instead, which fires force-hold-import (PRD §8.6).
     states = _states()  # default: 0 PV, 1 kW load
     states["input_boolean.force_export"] = StateView(state="on", attributes={})
     cfg = _config(force_pv_export_entity="input_boolean.force_export")
@@ -605,7 +612,8 @@ def test_force_pv_export_on_inactive_when_lp_doesnt_export() -> None:
 
     first = cycle.result.slots[0]
     assert first.p_sell_kw == pytest.approx(0.0, abs=1e-3)
-    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    assert first.p_buy_kw == pytest.approx(1.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1e-3)
     assert cycle.force_pv_export_enabled is True  # toggle read, branch idle
 
 
@@ -807,3 +815,79 @@ def test_min_sell_price_partial_horizon_gates_only_cheap_slots() -> None:
     assert slots[2].p_sell_kw + slots[3].p_sell_kw > 1e-3
     # Slot 0 is gated -> feed-in switch off this cycle.
     assert cycle.applied_feedin is False
+
+
+# ---------------------------------------------------------------------------
+# Force-hold-import (PRD §8.6). When the LP plans pure grid coverage of the
+# load with the battery idle (``p_buy > 0`` ∧ ``p_chg = p_dis = 0``), the
+# planner must pin the grid set-point to the planned import. Otherwise the
+# inverter's native EMS would silently drain the battery to cover the load —
+# violating the LP's intent (typically driven by the §8.5 health-floor
+# penalty making further discharge expensive, or by ``soc_min`` sitting
+# above the inverter's BMS floor).
+# ---------------------------------------------------------------------------
+
+
+def test_force_hold_import_writes_positive_setpoint_matching_load() -> None:
+    # Pure nighttime load (no PV, 1.5 kW load), nothing to arbitrage. The LP
+    # plans grid coverage with the battery idle; force-hold-import pins the
+    # set-point to ``p_buy * 1000`` so the EMS doesn't drain the battery.
+    states = _states(load_w=1500.0)
+    caller = FakeCaller()
+    cycle = Planner(_config(), FakeReader(states), caller).step(NOW)
+
+    first = cycle.result.slots[0]
+    assert first.p_buy_kw == pytest.approx(1.5, abs=1e-3)
+    assert first.p_chg_kw == pytest.approx(0.0, abs=1e-3)
+    assert first.p_dis_kw == pytest.approx(0.0, abs=1e-3)
+    assert first.p_sell_kw == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(1500.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(
+        (first.p_buy_kw - first.p_sell_kw) * 1000.0, abs=1e-3,
+    )
+    assert cycle.applied_feedin is False
+
+
+def test_force_hold_import_dormant_when_lp_discharges_battery() -> None:
+    # Slot 0 is expensive to buy from (0.50), the rest of the horizon is
+    # cheap (0.05). The LP discharges the battery now and recharges later
+    # (sell=0 throughout, so no export confounds the picture). Slot 0 has
+    # p_dis > 0 ∧ p_buy = 0 -> force-hold-import does NOT fire and the
+    # set-point stays passive (0); the inverter's self-consumption mode
+    # handles the discharge naturally.
+    states = _states(
+        load_w=1000.0,
+        buy=_hourly(value_at_noon=0.50, value_elsewhere=0.05),
+        sell=[0.0] * 24,
+    )
+    cycle = Planner(_config(), FakeReader(states), FakeCaller()).step(NOW)
+
+    first = cycle.result.slots[0]
+    assert first.p_buy_kw == pytest.approx(0.0, abs=1e-3)
+    assert first.p_dis_kw > 1e-3                               # battery covers load
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+
+
+def test_physical_soc_projection_stays_flat_under_force_hold_import() -> None:
+    # Same scenario as the basic force-hold-import test: pure-load coverage
+    # from the grid with battery idle. The physical-SoC projection must
+    # mirror the LP (battery flat) instead of running the passive-deficit
+    # branch that would project a discharge equal to load × dt.
+    #
+    # Non-zero cycle_cost makes the all-slots-idle answer strictly cheaper
+    # than gratuitous round-trips (LP would otherwise be indifferent under
+    # 100% efficiency + zero cycle cost).
+    cfg = _config()
+    cfg = replace(cfg, battery=replace(cfg.battery, cycle_cost_per_kwh=0.01))
+    states = _states(soc_pct=50.0, load_w=1500.0)  # 50% of 10 kWh -> 5.0 kWh
+    cycle = Planner(cfg, FakeReader(states), FakeCaller()).step(NOW)
+
+    slots = cycle.result.slots
+    # All slots are pure-load coverage -> all force-hold-import.
+    for s in slots:
+        assert s.p_buy_kw == pytest.approx(1.5, abs=1e-3)
+        assert s.p_chg_kw == pytest.approx(0.0, abs=1e-3)
+        assert s.p_dis_kw == pytest.approx(0.0, abs=1e-3)
+    # Projection stays flat across the whole horizon (no physical drain).
+    for s in slots:
+        assert s.soc_physical_kwh == pytest.approx(5.0, abs=1e-3)

@@ -60,8 +60,8 @@ Four steps in the UI:
 | Step | What you provide |
 |---|---|
 | Entities | Sensor IDs for load, PV, grid, SoC, buy/sell prices (today + optional tomorrow), PV forecast, optional load forecast, optional feed-in override, optional **force-PV-export** toggle; plus the `number` for the Victron grid set-point and the `switch` controlling feed-in. |
-| Battery  | Usable capacity (kWh), SoC min/max %, max charge/discharge power (kW), round-trip efficiencies, **cycle cost in your currency / kWh of throughput** (≈ `battery_price / (cycles × usable_kWh × η_rt)`). |
-| Solver   | Slot length (default 60 min), horizon (default 24 h), update interval (default 5 min), max grid import/export (kW), set-point write tolerance (W). |
+| Battery  | Usable capacity (kWh), SoC min/max %, max charge/discharge power (kW), round-trip efficiencies, **cycle cost in your currency / kWh of throughput** (≈ `battery_price / (cycles × usable_kWh × η_rt)`), optional **soft SoC health floor (%)** and **low-SoC dwell penalty (currency / kWh / h)** — see *Soft SoC health floor* below. |
+| Solver   | Slot length (default 60 min), horizon (default 24 h), update interval (default 5 min), max grid import/export (kW), set-point write tolerance (W), **minimum sell price (currency/kWh; default 0)** — see *Minimum sell price* below. |
 | Load forecast | Lookback days (default 7), optional cap (kW; 0 = no cap), weekday-aware mode (default off). Skipped at runtime when an external `load_forecast_entity` was set in the Entities step. |
 
 Options flow re-exposes the **Battery + Solver + Load-forecast** knobs in a
@@ -124,12 +124,14 @@ battery → grid surplus, gated by the feed-in switch).
 | Force-discharge (`p_dis > 0 ∧ p_sell > 0`) | `(p_buy − p_sell) · 1000` (negative) | `on` |
 | Force-charge (`p_chg > 0 ∧ p_buy > 0`)     | `(p_buy − p_sell) · 1000` (positive) | `off` |
 | Pure PV export, force-export toggle **on** (battery idle) | `(p_buy − p_sell) · 1000` (negative) | `on` |
-| Anything else (PV deficit, idle, pure export with toggle **off**) | `0` | `on` iff LP wants to sell |
+| Force-hold-import (`p_buy > 0` with battery idle) | `(p_buy − p_sell) · 1000` (positive) | `off` |
+| Anything else (PV deficit covered by battery, idle, pure export with toggle **off**) | `0` | `on` iff LP wants to sell |
 
 Forcing a non-zero set-point speculatively is brittle: a PV undershoot would
 make the inverter discharge the battery to defend a target it was never
 asked to defend. Set-point = 0 hands those degrees of freedom back to the
-inverter.
+inverter — but only when the LP and the inverter actually agree on what
+"do nothing" means (see *Force-hold-import* below).
 
 ### Force-PV-export toggle
 The default passive behaviour means morning PV ends up charging the battery
@@ -155,6 +157,48 @@ the inverter's native logic from exporting at the floor price too. Useful
 when the marginal sell revenue (e.g. 0.10 CZK/kWh) doesn't justify running
 the inverter at full export power. Leave at `0` to disable the floor.
 
+### Soft SoC health floor
+The hard `SoC min` bound stops the LP at the inverter / chemistry safety
+floor but says nothing about *dwelling* there. Without further input the
+LP cheerfully drains to `SoC min` mid-afternoon and parks the battery at
+the bottom for 18 hours when the next day's prices don't beat today's —
+fine for revenue, bad for calendar aging (more so on NMC, mildly on LFP).
+
+Two opt-in Battery knobs add a *soft* floor above `SoC min`:
+
+| Knob | Default | Unit | Meaning |
+|---|---|---|---|
+| Soft SoC health floor | = `SoC min` (off) | % | SoC the LP is encouraged to stay above |
+| Low-SoC dwell penalty | `0` (off) | currency / (kWh·h) | per-hour cost of each kWh below the floor |
+
+The LP can still dip below the floor — that's the *soft* part — but only
+when the slot's marginal economic gain (sell revenue, displaced buy)
+beats the cumulative penalty over the rest of the horizon. A typical
+configuration (`floor = 40 %`, `penalty = 0.5 CZK/(kWh·h)`) costs ~0.5
+CZK/h per kWh of shortfall: enough to nudge the LP into recharging during
+cheap hours, weak enough to yield to a real evening peak. Defaults make
+the feature a regression no-op (no slack vars, no objective term).
+
+### Force-hold-import
+"Set-point = 0 means do nothing" only works when the LP and the inverter
+agree on what "do nothing" is. They disagree in two situations where the
+LP wants to cover the load purely from the grid with the battery idle:
+
+- The soft health floor (above) makes further discharge expensive enough
+  that grid import wins, but the inverter's native EMS doesn't know
+  about that penalty and would drain the battery anyway.
+- `SoC min` is set above the inverter's BMS floor (e.g. 20 % reserve on
+  a battery the BMS allows down to 10 %); the LP respects `SoC min`,
+  the EMS doesn't.
+
+Both are silent plan violations: passive set-point `0` looks fine but the
+battery quietly empties. The fourth row in the table above fixes it: when
+the LP plans `p_buy > 0` with the battery idle, the planner pins the grid
+set-point to that planned import (positive, typically tracking load).
+Always-on, no toggle — when the predicate doesn't fire (e.g. battery
+already at the hard floor with no arbitrage to defend) the forced
+positive set-point produces the same physical behaviour as `0`.
+
 ## Diagnostic sensors
 Up to six sensors are created so the plan is visible in HA dashboards:
 
@@ -172,7 +216,8 @@ Up to six sensors are created so the plan is visible in HA dashboards:
 | Attribute | Meaning |
 |---|---|
 | `slots` | Per-slot list with ISO-tagged `start`, `duration_h`, `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `soc_start_kwh`, `soc_physical_kwh`. |
-| `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh` | Battery params, exposed so dashboards can compute SoC % and draw reserve / ceiling lines without hardcoding. |
+| `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh`, `soc_health_kwh` | Battery params, exposed so dashboards can compute SoC % and draw reserve / ceiling / health-floor lines without hardcoding. |
+| `low_soc_penalty_per_kwh_h` | Active dwell-penalty rate (currency/(kWh·h); `0` = disabled). |
 | `force_pv_export_enabled` | Mirrors the toggle's last-read value (`null` if unset, `true`/`false` otherwise). |
 | `min_sell_price_per_kwh` | Active sell-price floor (currency/kWh; `0` = disabled). |
 | `horizon_slots`, `status`, `solve_time_s`, `error` | Solver diagnostics. |

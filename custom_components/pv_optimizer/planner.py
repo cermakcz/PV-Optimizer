@@ -182,6 +182,17 @@ class Planner:
         # (``p_sell > 0`` with the battery idle). This is only safe because
         # ``_build_inputs`` substitutes ``min(forecast, live_avg)`` for
         # slot-0 PV, so the LP can't speculate above measured production.
+        #
+        # Force-hold-import (PRD §8.6): the LP can also rationally plan to
+        # cover load purely from the grid with the battery idle (typically
+        # when the §8.5 health floor makes further discharge expensive, or
+        # when the configured ``soc_min`` sits above the inverter's BMS
+        # floor). The native EMS would still drain the battery first in
+        # that case, silently violating the plan, so we explicitly pin the
+        # grid set-point to the planned import. Always-on: when the
+        # predicate doesn't fire (e.g. battery already at hard floor) the
+        # forced positive set-point produces the same physical behaviour
+        # as set-point 0.
         first = result.slots[0]
         force_discharge = first.p_dis_kw > _FORCE_EPS and first.p_sell_kw > _FORCE_EPS
         force_charge = first.p_buy_kw > _FORCE_EPS and first.p_chg_kw > _FORCE_EPS
@@ -189,7 +200,10 @@ class Planner:
                         and first.p_sell_kw > _FORCE_EPS
                         and first.p_chg_kw < _FORCE_EPS
                         and first.p_dis_kw < _FORCE_EPS)
-        if force_discharge or force_charge or force_export:
+        force_hold_import = (first.p_buy_kw > _FORCE_EPS
+                             and first.p_chg_kw < _FORCE_EPS
+                             and first.p_dis_kw < _FORCE_EPS)
+        if force_discharge or force_charge or force_export or force_hold_import:
             setpoint_w = (first.p_buy_kw - first.p_sell_kw) * 1000.0
         else:
             setpoint_w = 0.0
@@ -499,11 +513,12 @@ def _attach_physical_soc(inputs: OptimizerInputs,
     For each slot we estimate the SoC the inverter will physically reach
     at slot start, distinct from the LP's bookkeeping ``soc_start_kwh``:
 
-    * If the LP forces a battery action (force-charge, force-discharge, or
-      force-export — the same predicate the planner uses to override the
-      inverter setpoint), the inverter follows the LP and we apply the
-      LP's own SoC update. For force-export the LP keeps the battery
-      idle (``p_chg = p_dis = 0``) so the projection stays flat too.
+    * If the LP forces a battery action (force-charge, force-discharge,
+      force-export, or force-hold-import — the same predicate the planner
+      uses to override the inverter setpoint), the inverter follows the
+      LP and we apply the LP's own SoC update. For force-export and
+      force-hold-import the LP keeps the battery idle (``p_chg = p_dis
+      = 0``) so the projection stays flat too.
     * Otherwise the inverter runs in self-consumption mode (setpoint=0):
       surplus PV charges the battery up to ``soc_max``, deficit is met by
       discharging down to ``soc_min``; the rest spills to grid or is
@@ -524,8 +539,11 @@ def _attach_physical_soc(inputs: OptimizerInputs,
                         and sp.p_sell_kw > eps
                         and sp.p_chg_kw < eps
                         and sp.p_dis_kw < eps)
+        force_hold_import = (sp.p_buy_kw > eps
+                             and sp.p_chg_kw < eps
+                             and sp.p_dis_kw < eps)
         out.append(replace(sp, soc_physical_kwh=soc))
-        if force_charge or force_discharge or force_export:
+        if force_charge or force_discharge or force_export or force_hold_import:
             dsoc = dt * (bat.eta_chg * sp.p_chg_kw - sp.p_dis_kw / bat.eta_dis)
         else:
             net = pv - load  # >0 surplus, <0 deficit, all on AC side

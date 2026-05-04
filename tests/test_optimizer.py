@@ -186,6 +186,92 @@ def test_passive_cost_matches_manual() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Soft "health" floor (PRD §8.5). A linear per-slot penalty on
+# (soc_health - soc[t])+ teaches the LP that long dwells at low SoC cost
+# money, without rigidly forbidding deep discharges when prices warrant.
+# Defaults (floor == soc_min, penalty == 0) make the feature a no-op.
+# ---------------------------------------------------------------------------
+
+
+def test_low_soc_penalty_default_zero_is_noop() -> None:
+    # With penalty == 0 the LP must produce the same plan whether the
+    # health floor sits at soc_min or above it. Cheap buy + zero sell, no
+    # PV, no load -> baseline LP keeps the battery at the initial (= min)
+    # SoC because there is no economic reason to charge.
+    bat = _battery(
+        soc_health_kwh=5.0, low_soc_penalty_per_kwh_h=0.0,
+    )
+    slots = _slots([0.05] * 4, [0.0] * 4)
+    inp = OptimizerInputs(slots, [0.0] * 4, [0.0] * 4, 1.0, bat, 10, 10)
+    r = solve(inp)
+    assert r.status == "Optimal"
+    # No charging anywhere -> battery stays at the initial soc_min (1 kWh).
+    for sp in r.slots:
+        assert sp.p_chg_kw == pytest.approx(0.0, abs=1e-3)
+        assert sp.soc_start_kwh == pytest.approx(1.0, abs=1e-3)
+    assert r.total_cost == pytest.approx(0.0, abs=1e-6)
+
+
+def test_low_soc_penalty_pulls_soc_to_health_floor_when_cheap() -> None:
+    # Same scenario as above but with the penalty turned on. Now it is
+    # cheaper to charge to the health floor (paying buy*4 kWh + cycle_cost)
+    # than to keep paying the dwell penalty for four slots. Battery should
+    # land at soc_health by the start of slot 1 and stay there.
+    bat = _battery(
+        soc_health_kwh=5.0, low_soc_penalty_per_kwh_h=1.0,
+    )
+    slots = _slots([0.05] * 4, [0.0] * 4)
+    inp = OptimizerInputs(slots, [0.0] * 4, [0.0] * 4, 1.0, bat, 10, 10)
+    r = solve(inp)
+    assert r.status == "Optimal"
+    # Slot 0 charges 4 kWh; subsequent slots sit at the health floor with
+    # zero penalty contribution.
+    assert r.slots[0].p_chg_kw == pytest.approx(4.0, abs=1e-3)
+    assert r.slots[0].p_buy_kw == pytest.approx(4.0, abs=1e-3)
+    for sp in r.slots[1:]:
+        assert sp.soc_start_kwh == pytest.approx(5.0, abs=1e-3)
+        assert sp.p_chg_kw == pytest.approx(0.0, abs=1e-3)
+    # soc_end honoured too (terminal default == initial == 1, so anything
+    # >= 1 is acceptable; LP keeps it at the health floor since lowering
+    # it again costs cycle/penalty for no benefit).
+    assert r.extras["soc_end_kwh"] == pytest.approx(5.0, abs=1e-3)
+
+
+def test_low_soc_penalty_yields_to_strong_sell_opportunity() -> None:
+    # Battery starts full (9 kWh = soc_max). Slot 0 has a high sell price
+    # (10.0/kWh), the other slots have zero sell price. With a non-trivial
+    # dwell penalty (0.5/(kWh*h)) and a generous health floor (5 kWh),
+    # the LP should discharge the battery as deep as the discharge-power
+    # limit allows in slot 0 and accept the subsequent dwell-below-floor
+    # penalty, because the export revenue vastly outweighs it. Grid
+    # import is disabled so the battery is the only source for the
+    # lucrative export — otherwise the LP would saturate the export cap
+    # via grid arbitrage and the marginal value of the battery dip would
+    # collapse to (sell - buy) instead of the full sell price.
+    bat = _battery(
+        soc_health_kwh=5.0, low_soc_penalty_per_kwh_h=0.5,
+    )
+    slots = _slots(
+        [10.0, 10.0, 10.0, 10.0],   # buy (disabled by import limit anyway)
+        [10.0, 0.0, 0.0, 0.0],      # sell — only slot 0 is lucrative
+    )
+    inp = OptimizerInputs(slots, [0.0] * 4, [0.0] * 4, 9.0, bat, 0, 50,
+                          terminal_soc_kwh=1.0)
+    r = solve(inp)
+    assert r.status == "Optimal"
+    # Slot 0 discharges at the power limit (5 kW * 1 h = 5 kWh), taking
+    # SoC from 9 to 4 — strictly below the 5 kWh health floor.
+    assert r.slots[0].p_dis_kw == pytest.approx(5.0, abs=1e-3)
+    post_dis_socs = [sp.soc_start_kwh for sp in r.slots[1:]]
+    assert any(s < 5.0 - 1e-3 for s in post_dis_socs)
+    # And the LP must have actually exported in slot 0 (otherwise the
+    # test isn't exercising the "yields to revenue" branch).
+    assert r.slots[0].p_sell_kw > 1e-3
+    # Net cost negative — selling at 10/kWh dominates the small penalty.
+    assert r.total_cost < 0.0
+
+
+# ---------------------------------------------------------------------------
 # Solver-selection coverage. The integration must not depend on the CBC
 # subprocess (which is missing on Python 3.14 + sdist installs of pulp).
 # ---------------------------------------------------------------------------

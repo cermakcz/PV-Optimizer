@@ -106,6 +106,34 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
     # Terminal SoC (at end of horizon)
     prob += soc_end >= terminal, "soc_terminal"
 
+    # Optional soft "health" floor above ``soc_min``. For each slot we add
+    # a slack ``deficit[t] >= max(0, soc_health - soc[t])`` and pay
+    # ``penalty * dt[t] * deficit[t]`` in the objective. This costs the LP
+    # money for parking the battery near the bottom of its operating range
+    # without rigidly forbidding deep discharges when prices warrant. The
+    # end-of-horizon ``soc_end`` gets the same treatment so the LP can't
+    # game the boundary by parking low at the last slot. Disabled (no
+    # variables, no constraints) when penalty == 0 or the floor sits at /
+    # below ``soc_min`` — both defaults, so this is a no-op for upgrading
+    # users until they explicitly opt in. See PRD §8.5.
+    health_active = (
+        bat.low_soc_penalty_per_kwh_h > 0
+        and bat.soc_health_kwh > bat.soc_min_kwh
+    )
+    deficit: list = []
+    deficit_end = None
+    if health_active:
+        for t in range(n):
+            d = pulp.LpVariable(f"deficit_{t}", lowBound=0,
+                                upBound=bat.soc_health_kwh - bat.soc_min_kwh)
+            prob += d >= bat.soc_health_kwh - soc[t], f"deficit_{t}_lb"
+            deficit.append(d)
+        deficit_end = pulp.LpVariable(
+            "deficit_end", lowBound=0,
+            upBound=bat.soc_health_kwh - bat.soc_min_kwh,
+        )
+        prob += deficit_end >= bat.soc_health_kwh - soc_end, "deficit_end_lb"
+
     # Objective. Two tiny regularizers break degeneracy without changing
     # economically meaningful decisions:
     #   - eps_curt penalises curtailment so free PV is stored when possible.
@@ -125,6 +153,17 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
                 + eps_curt * p_curt[t]
                 + eps_cycle * (p_chg[t] + p_dis[t])
             )
+        )
+        if health_active:
+            cost_terms.append(
+                dt[t] * bat.low_soc_penalty_per_kwh_h * deficit[t]
+            )
+    if health_active:
+        # Charge ``deficit_end`` over the duration of the final slot so the
+        # boundary penalty is dimensionally consistent with the per-slot
+        # ones (currency/(kWh*h) * kWh * h).
+        cost_terms.append(
+            dt[-1] * bat.low_soc_penalty_per_kwh_h * deficit_end
         )
     prob += pulp.lpSum(cost_terms)
 

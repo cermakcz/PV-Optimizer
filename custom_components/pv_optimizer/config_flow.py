@@ -88,6 +88,16 @@ _BATTERY_SCHEMA = vol.Schema({
     # NumberSelector label at schema-build time, so we leave it as a bare
     # "/kWh" suffix and rely on the Currency field above for context.
     vol.Required(C.CONF_BATTERY_CYCLE_COST, default=C.DEFAULT_CYCLE_COST): _num(0.0, 10.0, 0.001, "/kWh"),
+    # Soft "health" floor and its penalty rate (currency / kWh-hour). When
+    # the floor is above ``soc_min`` AND the penalty is non-zero, the LP
+    # incurs cost for letting projected SoC sit below the floor — same
+    # mechanism as the cycle cost but charged on dwell-at-low-SoC instead
+    # of on throughput. Default (floor == soc_min, penalty == 0) is a
+    # backward-compatible no-op.
+    vol.Required(C.CONF_BATTERY_SOC_HEALTH_PCT,
+                 default=C.DEFAULT_SOC_HEALTH_PCT): _num(0.0, 100.0, 1.0, "%"),
+    vol.Required(C.CONF_BATTERY_LOW_SOC_PENALTY,
+                 default=C.DEFAULT_LOW_SOC_PENALTY): _num(0.0, 100.0, 0.01, "/kWh/h"),
 })
 
 

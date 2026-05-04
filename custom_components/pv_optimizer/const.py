@@ -33,6 +33,14 @@ CONF_BATTERY_P_DIS_MAX_KW = "battery_p_dis_max_kw"
 CONF_BATTERY_ETA_CHG = "battery_eta_chg"
 CONF_BATTERY_ETA_DIS = "battery_eta_dis"
 CONF_BATTERY_CYCLE_COST = "battery_cycle_cost_per_kwh"
+# Soft "health" floor above the hard ``soc_min``. The optimizer adds a
+# linear penalty for each kWh-hour the projected SoC spends below this
+# value, so the LP self-corrects against long dwells at the bottom of
+# the operating range without rigidly constraining short, high-value
+# discharges. Disabled by default (``soc_health == soc_min`` AND
+# penalty == 0). See PRD §8.5.
+CONF_BATTERY_SOC_HEALTH_PCT = "battery_soc_health_pct"
+CONF_BATTERY_LOW_SOC_PENALTY = "battery_low_soc_penalty_per_kwh_h"
 
 # --- Solver / planning ---
 CONF_SLOT_MINUTES = "slot_minutes"
@@ -68,6 +76,11 @@ DEFAULT_ETA_CHG = 0.95
 DEFAULT_ETA_DIS = 0.95
 DEFAULT_CYCLE_COST = 0.05  # currency/kWh of throughput; tune to your currency
                            # (typical: ~0.05 EUR, ~0.06 USD, ~1.5 CZK, etc.)
+# Health floor defaults to soc_min so the soft-floor penalty has zero
+# bandwidth to act on out of the box; combined with a zero penalty rate
+# this is a regression no-op until the user opts in.
+DEFAULT_SOC_HEALTH_PCT = DEFAULT_SOC_MIN_PCT
+DEFAULT_LOW_SOC_PENALTY = 0.0   # currency/(kWh*h) below the health floor
 DEFAULT_SETPOINT_TOLERANCE_W = 50.0
 DEFAULT_MIN_SELL_PRICE = 0.0   # currency/kWh; 0 = no floor (sell whenever LP wants to)
 DEFAULT_LOAD_FORECAST_LOOKBACK_DAYS = 7

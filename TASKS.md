@@ -22,7 +22,8 @@ the in-repo `pytest` suite. HA-side items (`coordinator`, `config_flow`,
 
 ## 2. Data models (`models.py`)
 - [x] `BatteryParams` — capacity, SoC bounds, p_chg/p_dis_max, η_chg, η_dis,
-      `cycle_cost_per_kwh`.
+      `cycle_cost_per_kwh`, optional soft `soc_health_kwh` and
+      `low_soc_penalty_per_kwh_h` for the PRD §8.5 health floor.
 - [x] `TariffSlot` — start (UTC), duration_h, buy/sell, feedin_allowed.
 - [x] `OptimizerInputs` — slots, pv_kw, load_kw, initial_soc_kwh, battery,
       grid import/export caps, optional terminal SoC.
@@ -42,6 +43,9 @@ the in-repo `pytest` suite. HA-side items (`coordinator`, `config_flow`,
 - [x] Free self-consumption, surplus-with-feed-in, surplus-without-feed-in,
       pure arbitrage, amortization gating, power-limit saturation, terminal
       SoC, infeasibility, round-trip-efficiency drag.
+- [x] Soft SoC health floor (PRD §8.5): default-zero penalty is a regression
+      no-op, non-zero penalty + cheap charge slot pulls SoC up to the floor,
+      strong sell opportunity still allowed to dip below it.
 
 ## 5. Planner (`planner.py`) — pure read→solve→apply pipeline
 - [x] `Planner.step(now)` — reads state, solves, applies set-point + switch.
@@ -67,6 +71,11 @@ the in-repo `pytest` suite. HA-side items (`coordinator`, `config_flow`,
       `feedin_allowed := feedin_global ∧ (price_sell ≥ min_sell_price)`,
       enforced by the optimizer as `p_sell[t] = 0` for sub-threshold
       slots. Default `0.0` is a backward-compatible no-op.
+- [x] Force-hold-import branch (PRD §8.6): when the LP plans pure grid
+      coverage with the battery idle (`p_buy > ε ∧ p_chg < ε ∧ p_dis
+      < ε`), pin the set-point to `(p_buy − p_sell) · 1000` so the
+      inverter's native EMS doesn't silently drain the battery. Mirrored
+      in the §8.3 physical-SoC projection.
 - [x] Surfaces `last_error`, `last_result`, `applied_setpoint_w`,
       `last_solve_time`, `force_pv_export_enabled` on the cycle object.
 
@@ -84,6 +93,10 @@ the in-repo `pytest` suite. HA-side items (`coordinator`, `config_flow`,
 - [x] Minimum sell price floor: default 0 regression no-op, floor above
       all prices disables export horizon-wide, partial floor gates only
       the cheap slots within the horizon.
+- [x] Force-hold-import (PRD §8.6): pure-load coverage writes a positive
+      set-point matching planned import; dormant when LP discharges the
+      battery instead; physical-SoC projection stays flat when the branch
+      fires.
 
 ## 7. Built-in load forecaster (`load_forecaster.py`)
 - [x] `LoadForecaster.forecast_kw(now, n_slots, slot_h)` —
@@ -132,10 +145,12 @@ the in-repo `pytest` suite. HA-side items (`coordinator`, `config_flow`,
       `ExpectedCostSensor`, `SavingsSensor`, `PlanSensor` (full plan in
       `extra_state_attributes`), `LoadForecastSensor`.
 - [x] `PlanSensor` attributes include `capacity_kwh`, `soc_min_kwh`,
-      `soc_max_kwh` (for SoC % conversion / reserve lines in dashboards),
+      `soc_max_kwh`, `soc_health_kwh` (for SoC % conversion / reserve /
+      health-floor lines in dashboards), `low_soc_penalty_per_kwh_h`
+      (active dwell-penalty rate; 0 = disabled),
       `force_pv_export_enabled` (toggle state),
-      `min_sell_price_per_kwh` (active floor; 0 = disabled), and per-slot
-      `soc_physical_kwh` alongside `soc_start_kwh`.
+      `min_sell_price_per_kwh` (active sell-price floor; 0 = disabled),
+      and per-slot `soc_physical_kwh` alongside `soc_start_kwh`.
 - [x] Currency-agnostic units (`your_currency`) on cost / savings sensors.
 - [x] Sensors become unavailable on solver failure / no data.
 

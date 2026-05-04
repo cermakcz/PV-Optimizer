@@ -25,6 +25,9 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
     capacity = float(data[C.CONF_BATTERY_CAPACITY_KWH])
     soc_min_kwh = capacity * float(data[C.CONF_BATTERY_SOC_MIN_PCT]) / 100.0
     soc_max_kwh = capacity * float(data[C.CONF_BATTERY_SOC_MAX_PCT]) / 100.0
+    soc_health_kwh = capacity * float(
+        data.get(C.CONF_BATTERY_SOC_HEALTH_PCT, C.DEFAULT_SOC_HEALTH_PCT)
+    ) / 100.0
     battery = BatteryParams(
         capacity_kwh=capacity,
         soc_min_kwh=soc_min_kwh,
@@ -34,6 +37,10 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
         eta_chg=float(data[C.CONF_BATTERY_ETA_CHG]),
         eta_dis=float(data[C.CONF_BATTERY_ETA_DIS]),
         cycle_cost_per_kwh=float(data[C.CONF_BATTERY_CYCLE_COST]),
+        soc_health_kwh=soc_health_kwh,
+        low_soc_penalty_per_kwh_h=float(
+            data.get(C.CONF_BATTERY_LOW_SOC_PENALTY, C.DEFAULT_LOW_SOC_PENALTY)
+        ),
     )
     config = PlannerConfig(
         load_power_entity=data[C.CONF_LOAD_POWER],

@@ -22,6 +22,12 @@ class BatteryParams:
     eta_chg: float = 0.95
     eta_dis: float = 0.95
     cycle_cost_per_kwh: float = 0.05    # currency/kWh of throughput
+    # Soft "health" floor: per-slot penalty rate applied to (soc_health -
+    # soc[t])+ so the LP avoids long dwells at low SoC without a hard
+    # constraint. Disabled when ``low_soc_penalty_per_kwh_h == 0`` or
+    # ``soc_health_kwh <= soc_min_kwh`` — both defaults make this a no-op.
+    soc_health_kwh: float = 0.0
+    low_soc_penalty_per_kwh_h: float = 0.0   # currency/(kWh*h) below floor
 
     def __post_init__(self) -> None:
         if self.capacity_kwh <= 0:
@@ -34,6 +40,10 @@ class BatteryParams:
             raise ValueError("efficiencies must be in (0, 1]")
         if self.cycle_cost_per_kwh < 0:
             raise ValueError("cycle_cost must be >= 0")
+        if self.soc_health_kwh < 0 or self.soc_health_kwh > self.soc_max_kwh:
+            raise ValueError("soc_health_kwh must be in [0, soc_max_kwh]")
+        if self.low_soc_penalty_per_kwh_h < 0:
+            raise ValueError("low_soc_penalty_per_kwh_h must be >= 0")
 
 
 @dataclass(frozen=True)
