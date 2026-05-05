@@ -21,7 +21,7 @@ class BatteryParams:
     p_dis_max_kw: float
     eta_chg: float = 0.95
     eta_dis: float = 0.95
-    cycle_cost_per_kwh: float = 0.05    # currency/kWh of throughput
+    cycle_cost_per_kwh: float = 0.05    # currency/kWh delivered (discharge)
     # Soft "health" floor: per-slot penalty rate applied to (soc_health -
     # soc[t])+ so the LP avoids long dwells at low SoC without a hard
     # constraint. Disabled when ``low_soc_penalty_per_kwh_h == 0`` or

@@ -126,7 +126,8 @@ def test_arbitrage_cheap_to_expensive_no_cycle_cost() -> None:
 
 
 def test_high_cycle_cost_kills_arbitrage() -> None:
-    # Spread is 0.10, throughput cost on charge+discharge would be 2 * 0.20 = 0.40 -> never pays.
+    # Spread is 0.10, cycle cost on the discharge leg is 0.20 per delivered
+    # kWh -> arbitrage never pays back, LP stays idle.
     bat = _battery(cycle_cost_per_kwh=0.20)
     prices = [0.05] * 4 + [0.15] * 4
     slots = _slots(prices, [0.0] * 8)

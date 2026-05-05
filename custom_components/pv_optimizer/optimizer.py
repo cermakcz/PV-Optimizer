@@ -140,6 +140,12 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
     #   - eps_cycle (much smaller) prefers idle over arbitrary cycling when
     #     cycling has zero economic value. eps_curt > eps_cycle ensures
     #     "charge instead of curtailing" wins.
+    # ``cycle_cost_per_kwh`` is amortised on the *discharge* leg only (LCOS
+    # convention: cost per kWh delivered out of the battery). The matching
+    # charge-side wear is implicit in the input number, which the README
+    # recipe derives as ``battery_price / (cycles · usable_kWh · η_rt)``.
+    # ``eps_cycle`` stays on both legs so it still discourages co-charging
+    # and co-discharging in the same slot when round-trip efficiency is 1.
     eps_curt = 1e-4
     eps_cycle = 1e-5
     cost_terms = []
@@ -149,7 +155,7 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
             dt[t] * (
                 s.price_buy * p_buy[t]
                 - s.price_sell * p_sell[t]
-                + bat.cycle_cost_per_kwh * (p_chg[t] + p_dis[t])
+                + bat.cycle_cost_per_kwh * p_dis[t]
                 + eps_curt * p_curt[t]
                 + eps_cycle * (p_chg[t] + p_dis[t])
             )

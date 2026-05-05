@@ -15,10 +15,11 @@ At every update tick the integration:
 2. Builds an LP over a configurable horizon (default 24 h, hourly slots).
 3. Solves it with PuLP, preferring **HiGHS** (in-process via `highspy`) and
    falling back to the bundled CBC binary, minimising
-   `Σ (price_buy·p_buy − price_sell·p_sell + cycle_cost·throughput)·Δt`
+   `Σ (price_buy·p_buy − price_sell·p_sell + cycle_cost·p_dis)·Δt`
    subject to power balance, battery dynamics, SoC bounds, charge/discharge
    limits, and grid import/export limits. Battery wear is included via a
-   per-kWh **cycle (amortization) cost**.
+   per-kWh **cycle (amortization) cost** booked on the discharge leg
+   (LCOS convention: cost per kWh delivered out of the battery).
 4. Writes the optimal current-slot grid set-point (W) and feed-in switch
    state to the configured Victron-backed `number`/`switch` entities.
    The set-point is only forced non-zero when the LP actively wants to move
@@ -60,7 +61,7 @@ Four steps in the UI:
 | Step | What you provide |
 |---|---|
 | Entities | Sensor IDs for load, PV, grid, SoC, buy/sell prices (today + optional tomorrow), PV forecast, optional load forecast, optional feed-in override, optional **force-PV-export** toggle; plus the `number` for the Victron grid set-point and the `switch` controlling feed-in. |
-| Battery  | Usable capacity (kWh), SoC min/max %, max charge/discharge power (kW), round-trip efficiencies, **cycle cost in your currency / kWh of throughput** (≈ `battery_price / (cycles × usable_kWh × η_rt)`), optional **soft SoC health floor (%)** and **low-SoC dwell penalty (currency / kWh / h)** — see *Soft SoC health floor* below. |
+| Battery  | Usable capacity (kWh), SoC min/max %, max charge/discharge power (kW), round-trip efficiencies, **cycle cost in your currency / kWh delivered out of the battery** — LCOS convention, booked on the discharge leg (≈ `battery_price / (cycles × usable_kWh × η_rt)`), optional **soft SoC health floor (%)** and **low-SoC dwell penalty (currency / kWh / h)** — see *Soft SoC health floor* below. |
 | Solver   | Slot length (default 60 min), horizon (default 24 h), update interval (default 5 min), max grid import/export (kW), set-point write tolerance (W), **minimum sell price (currency/kWh; default 0)** — see *Minimum sell price* below. |
 | Load forecast | Lookback days (default 7), optional cap (kW; 0 = no cap), weekday-aware mode (default off). Skipped at runtime when an external `load_forecast_entity` was set in the Entities step. |
 

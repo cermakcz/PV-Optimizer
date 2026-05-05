@@ -12,7 +12,7 @@ The optimizer trades off:
 - buying energy from the grid at hourly buy prices,
 - selling surplus energy at hourly sell prices,
 - (dis)charging the battery,
-- amortized battery wear cost per kWh of throughput.
+- amortized battery wear cost per kWh delivered out of the battery.
 
 ## 2. Scope and Non-Goals
 **In scope**
@@ -142,11 +142,11 @@ Single flow, four steps:
    toggles.
 2. **Battery** — usable capacity (kWh), SoC min/max (%), max charge/discharge
    power (kW), round-trip efficiencies (η_chg, η_dis), **cycle cost
-   (`your_currency`/kWh throughput)** ≈ `battery_price / (cycles ·
-   usable_kWh · η_rt)`, **soft SoC health floor (%; default = SoC min,
-   i.e. disabled)** and **low-SoC dwell penalty
-   (`your_currency`/(kWh·h); default `0`)** — together they implement
-   the §8.5 soft floor.
+   (`your_currency`/kWh delivered out of the battery — LCOS convention)**
+   ≈ `battery_price / (cycles · usable_kWh · η_rt)`, **soft SoC health
+   floor (%; default = SoC min, i.e. disabled)** and **low-SoC dwell
+   penalty (`your_currency`/(kWh·h); default `0`)** — together they
+   implement the §8.5 soft floor.
 3. **Solver** — slot length (default 60 min), horizon (default 24 h, max 48 h),
    update interval (default 5 min), max grid import/export (kW), set-point
    write tolerance (W), **minimum sell price (`your_currency`/kWh; default
@@ -190,14 +190,20 @@ are parameters.
 **Objective (minimize)**
 ```
 Σ_t Δt · [ price_buy[t]·p_buy[t] − price_sell[t]·p_sell[t]
-           + c_cycle·(p_chg[t] + p_dis[t])
+           + c_cycle·p_dis[t]
            + c_low_soc·deficit[t] ]
 ```
-With `c_cycle > 0` the LP will not co-charge/discharge in the same slot, so no
-binary variables are needed and the problem stays linear. The optional
-`deficit[t] ≥ max(0, soc_health − soc[t])` slack and its rate `c_low_soc`
-implement the §8.5 soft health floor; both default off (`c_low_soc = 0`,
-`soc_health = soc_min`) so the term vanishes for upgrading users.
+`c_cycle` is amortised on the discharge leg only — interpret the input as
+"currency per kWh delivered out of the battery" (LCOS convention). The
+matching charge-side wear is implicit in the input number, which the
+config recipe derives as `battery_price / (cycles · usable_kWh · η_rt)`.
+Round-trip efficiency (`η_rt < 1`) plus a tiny `eps_cycle · (p_chg+p_dis)`
+regulariser keep the LP from co-charging/discharging in the same slot
+without needing binary variables, so the problem stays linear. The
+optional `deficit[t] ≥ max(0, soc_health − soc[t])` slack and its rate
+`c_low_soc` implement the §8.5 soft health floor; both default off
+(`c_low_soc = 0`, `soc_health = soc_min`) so the term vanishes for
+upgrading users.
 
 Solver: **PuLP** with HiGHS preferred (`highspy`, in-process, no subprocess
 exec, ships pre-built wheels) and the bundled CBC binary as fallback. The
