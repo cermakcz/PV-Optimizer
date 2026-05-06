@@ -79,13 +79,12 @@ def _config(**overrides) -> PlannerConfig:
         eta_chg=1.0, eta_dis=1.0, cycle_cost_per_kwh=0.0,
     )
     return PlannerConfig(
-        **ENTITY_IDS,
         battery=bat,
         p_grid_imp_max_kw=10.0,
         p_grid_exp_max_kw=10.0,
         slot_minutes=60,
         horizon_hours=4,  # short horizon for fast tests
-        **overrides,
+        **{**ENTITY_IDS, **overrides},
     )
 
 
@@ -455,6 +454,59 @@ def test_pv_forecast_solcast_detailed_hourly_shape() -> None:
     assert first.p_sell_kw == pytest.approx(4.0, abs=1e-3)
     assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
     assert cycle.applied_feedin is True
+
+
+def test_pv_forecast_detailed_hourly_accepts_datetime_period_start() -> None:
+    # The Solcast HACS integration stores ``period_start`` as a tz-aware
+    # ``datetime`` (not an ISO string). _parse_iso must accept that shape
+    # so users can point ``pv_forecast_entity`` at the Solcast sensor
+    # directly without a template-sensor coercion step.
+    detailed_hourly = [
+        {"period_start": (NOW + timedelta(hours=h)).replace(tzinfo=timezone.utc),
+         "pv_estimate": 5.0}
+        for h in range(4)
+    ]
+    states = _states()
+    states["sensor.pv_forecast"] = StateView(
+        state="0", attributes={"detailedHourly": detailed_hourly})
+    planner = Planner(_config(), FakeReader(states), FakeCaller())
+
+    cycle = planner.step(NOW)
+
+    assert cycle.error is None
+    assert cycle.result.slots[0].p_sell_kw == pytest.approx(4.0, abs=1e-3)
+
+
+def test_pv_forecast_multiple_entities_merge_today_and_tomorrow() -> None:
+    # Solcast splits the forecast across a today and a tomorrow sensor;
+    # passing both as a list to ``pv_forecast_entity`` must merge them so
+    # the LP sees a continuous horizon spanning the two days.
+    today = [
+        {"period_start": (NOW + timedelta(hours=h)).replace(tzinfo=timezone.utc),
+         "pv_estimate": 5.0}
+        for h in range(2)  # NOW=12:00 -> today covers slots 0-1 (12:00, 13:00).
+    ]
+    tomorrow = [
+        {"period_start": (NOW + timedelta(hours=h)).replace(tzinfo=timezone.utc),
+         "pv_estimate": 5.0}
+        for h in range(2, 4)  # slots 2-3 (14:00, 15:00) supplied by tomorrow sensor.
+    ]
+    states = _states()
+    states["sensor.pv_today"] = StateView(
+        state="0", attributes={"detailedHourly": today})
+    states["sensor.pv_tomorrow"] = StateView(
+        state="0", attributes={"detailedHourly": tomorrow})
+    cfg = _config(pv_forecast_entity=["sensor.pv_today", "sensor.pv_tomorrow"])
+    planner = Planner(cfg, FakeReader(states), FakeCaller())
+
+    cycle = planner.step(NOW)
+
+    assert cycle.error is None
+    # All four slots see 4 kW surplus (5 PV - 1 load) once the merged map
+    # covers the entire horizon. If the merge weren't happening, slots 2-3
+    # would fall back to 0 PV and produce a 1 kW import instead.
+    for s in cycle.result.slots:
+        assert s.p_sell_kw == pytest.approx(4.0, abs=1e-3)
 
 
 class _FakeHistory:

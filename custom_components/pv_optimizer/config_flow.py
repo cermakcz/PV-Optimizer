@@ -52,7 +52,11 @@ _ENTITIES_SCHEMA = vol.Schema({
     vol.Required(C.CONF_BATTERY_SOC): _sensor(),
     vol.Required(C.CONF_BUY_PRICE_TODAY): _sensor(),
     vol.Required(C.CONF_SELL_PRICE_TODAY): _sensor(),
-    vol.Required(C.CONF_PV_FORECAST): _sensor(),
+    # Multi-select to support e.g. Solcast HACS today + tomorrow sensors;
+    # the planner reads each in order and merges per-hour entries.
+    vol.Required(C.CONF_PV_FORECAST): EntitySelector(
+        EntitySelectorConfig(domain="sensor", multiple=True)
+    ),
     vol.Optional(C.CONF_BUY_PRICE_TOMORROW): _sensor(),
     vol.Optional(C.CONF_SELL_PRICE_TOMORROW): _sensor(),
     vol.Optional(C.CONF_LOAD_FORECAST): _sensor(),
@@ -189,8 +193,14 @@ def _schema_with_suggestions(schema: vol.Schema, current: dict[str, Any]) -> vol
     for marker, validator in schema.schema.items():
         key = getattr(marker, "schema", marker)
         if isinstance(marker, vol.Marker) and key in current:
+            value = current[key]
+            # CONF_PV_FORECAST became a multi-select list; legacy entries
+            # saved before that change hold a bare string. Wrap it so the
+            # form pre-fills correctly without requiring re-setup.
+            if key == C.CONF_PV_FORECAST and isinstance(value, str):
+                value = [value]
             new_marker = copy.copy(marker)
-            new_marker.description = {"suggested_value": current[key]}
+            new_marker.description = {"suggested_value": value}
             new_keys[new_marker] = validator
         else:
             new_keys[marker] = validator

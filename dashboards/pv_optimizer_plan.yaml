@@ -36,7 +36,7 @@ yaxis:
 experimental:
   hidden_by_default: true
 series:
-  - entity: sensor.pv_optimizer_solar_forecast
+  - entity: sensor.solcast_pv_forecast_forecast_today
     name: PV forecast
     type: area
     color: "#f5b041"
@@ -47,9 +47,16 @@ series:
     curve: stepline
     show:
       legend_value: false
+    # Merge today + tomorrow ``detailedHourly`` lists so the series spans
+    # the full LP horizon. ``period_start`` is a tz-aware ISO string (or a
+    # JS-parseable date); ``pv_estimate`` is already kW.
     data_generator: |
-      return Object.entries(entity.attributes.wh_hours || {})
-        .map(([k, v]) => [new Date(k).getTime(), Number(v) / 1000]);
+      const tomorrow = hass.states['sensor.solcast_pv_forecast_forecast_tomorrow'];
+      const src = [
+        ...(entity.attributes.detailedHourly || []),
+        ...((tomorrow && tomorrow.attributes.detailedHourly) || []),
+      ];
+      return src.map(p => [new Date(p.period_start).getTime(), Number(p.pv_estimate)]);
   - entity: sensor.pv_optimizer_load_forecast
     name: Load forecast
     type: area

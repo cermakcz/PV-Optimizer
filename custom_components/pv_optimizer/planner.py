@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 import pulp
 
@@ -71,7 +71,12 @@ class PlannerConfig:
     battery_soc_entity: str
     buy_price_today_entity: str
     sell_price_today_entity: str
-    pv_forecast_entity: str
+    # Either a single entity ID or a list of them. Multiple entities are
+    # read in order and their per-hour forecasts merged (later entries
+    # override earlier ones for the same hour); this lets users point at
+    # e.g. the Solcast HACS today + tomorrow sensors directly without a
+    # template-sensor merge step.
+    pv_forecast_entity: str | Sequence[str]
     buy_price_tomorrow_entity: str | None = None
     sell_price_tomorrow_entity: str | None = None
     load_forecast_entity: str | None = None
@@ -371,7 +376,21 @@ class Planner:
             return default
         return str(st.state).lower() in ("on", "true", "1", "yes")
 
-    def _read_pv_forecast(self, entity_id: str, slot_starts: list[datetime], slot_h: float) -> list[float]:
+    def _read_pv_forecast(self, entity_id: str | Sequence[str],
+                          slot_starts: list[datetime], slot_h: float) -> list[float]:
+        # Normalise to a list so the rest of the function is uniform; a bare
+        # string is the legacy single-entity case.
+        entity_ids: list[str] = (
+            [entity_id] if isinstance(entity_id, str) else list(entity_id)
+        )
+        if not entity_ids:
+            raise ValueError("PV forecast entity list is empty")
+        merged: dict[datetime, float] = {}
+        for eid in entity_ids:
+            merged.update(self._read_pv_forecast_mapping(eid))
+        return [_lookup_forecast(merged, s, slot_h) for s in slot_starts]
+
+    def _read_pv_forecast_mapping(self, entity_id: str) -> dict[datetime, float]:
         st = self._state(entity_id)
         # Accept any of:
         #   * {"wh_hours": {"<iso>": Wh, ...}}                         (forecast.solar)
@@ -380,24 +399,21 @@ class Planner:
         #                          "pv_estimate": <kW>}, ...]}         (Solcast HACS)
         wh_hours = st.attributes.get("wh_hours")
         if isinstance(wh_hours, dict) and wh_hours:
-            mapping = {_parse_iso(k): float(v) / 1000.0 / 1.0 for k, v in wh_hours.items()}
             # wh_hours values are energy per 1h slot; convert Wh -> kW (since slot=1h).
             # If our slot != 1h we still treat each entry as average power for that hour.
-            return [_lookup_forecast(mapping, s, slot_h) for s in slot_starts]
+            return {_parse_iso(k): float(v) / 1000.0 for k, v in wh_hours.items()}
         forecast = st.attributes.get("forecast")
         if isinstance(forecast, list) and forecast:
-            mapping = {_parse_iso(p["datetime"]): float(p.get("power_kw", p.get("power", 0)))
-                       for p in forecast if "datetime" in p}
-            return [_lookup_forecast(mapping, s, slot_h) for s in slot_starts]
+            return {_parse_iso(p["datetime"]): float(p.get("power_kw", p.get("power", 0)))
+                    for p in forecast if "datetime" in p}
         # Solcast: ``pv_estimate`` is the median (P50) average kW over the
         # hour. Users wanting a conservative bias can build a template
         # sensor that re-keys ``pv_estimate10`` under the same attribute.
         detailed_hourly = st.attributes.get("detailedHourly")
         if isinstance(detailed_hourly, list) and detailed_hourly:
-            mapping = {_parse_iso(p["period_start"]): float(p["pv_estimate"])
-                       for p in detailed_hourly
-                       if "period_start" in p and "pv_estimate" in p}
-            return [_lookup_forecast(mapping, s, slot_h) for s in slot_starts]
+            return {_parse_iso(p["period_start"]): float(p["pv_estimate"])
+                    for p in detailed_hourly
+                    if "period_start" in p and "pv_estimate" in p}
         raise ValueError(f"PV forecast entity {entity_id!r} has no recognised attribute")
 
     def _read_load_forecast(self, entity_id: str | None, slot_starts: list[datetime],
@@ -444,10 +460,15 @@ def _floor_to_slot(now: datetime, slot_minutes: int) -> datetime:
     return now.replace(minute=minute, second=0, microsecond=0)
 
 
-def _parse_iso(s: str) -> datetime:
-    # Accept "...Z" and offset-aware/naive ISO strings; return naive UTC for keying.
-    s = s.replace("Z", "+00:00")
-    dt = datetime.fromisoformat(s)
+def _parse_iso(s: str | datetime) -> datetime:
+    # Accept "...Z" and offset-aware/naive ISO strings, or pre-parsed
+    # ``datetime`` objects (e.g. Solcast HACS exposes ``period_start`` as a
+    # tz-aware datetime, not a string). Always returns a naive-UTC,
+    # second/microsecond-stripped datetime suitable for slot keying.
+    if isinstance(s, datetime):
+        dt = s
+    else:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.replace(second=0, microsecond=0)

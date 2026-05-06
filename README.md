@@ -102,11 +102,14 @@ removing & re-adding the integration.
   missing, the planner refuses to run and records `last_error` rather than
   silently re-using yesterday's prices. Missing *future* hours simply
   truncate the planning horizon.
-- **PV forecast** sensor must expose one of:
+- **PV forecast** accepts either a single sensor or a list of sensors (the UI
+  exposes a multi-select; lists are merged per-hour, later entries winning).
+  Each sensor must expose one of:
   - a `wh_hours` dict (`forecast.solar` style: `{"<iso-hour>": Wh}`),
   - a `forecast` list of `{"datetime": "<iso>", "power_kw": <kW>}` entries, or
-  - a `detailedHourly` list of `{"period_start": "<iso>", "pv_estimate": <kW>}`
-    entries (Solcast HACS integration).
+  - a `detailedHourly` list of `{"period_start": "<iso>"|datetime,
+    "pv_estimate": <kW>}` entries (Solcast HACS integration — point at both
+    the today and tomorrow sensors to cover the full horizon natively).
 - **Load forecast** is optional. When unset, a built-in forecaster derives a
   per-slot expected load from the recorder history of the configured load-power
   entity using the **median over the last `lookback_days` days at the same
