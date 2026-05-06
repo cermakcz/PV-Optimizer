@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -84,10 +85,15 @@ class _HassHistoryReader(HistoryReader):
         # state_changes_during_period requires aware datetimes (UTC).
         start_aware = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start
         end_aware = end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end
+        # Timing breadcrumb: recorder queries dominate planner cycle time
+        # when the source entity has many state changes; surface that at
+        # DEBUG so users can correlate slow cycles with history volume.
+        t0 = _time.perf_counter()
         states = state_changes_during_period(
             self._hass, start_aware, end_aware,
             entity_id=entity_id, include_start_time_state=True,
         ).get(entity_id, [])
+        t1 = _time.perf_counter()
         out: list[tuple[datetime, float]] = []
         for st in states:
             try:
@@ -98,6 +104,10 @@ class _HassHistoryReader(HistoryReader):
             if ts.tzinfo is not None:
                 ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
             out.append((ts, v_kw))
+        _LOGGER.debug(
+            "recorder.get_history %s window=%s -> %d raw / %d parsed in %.2fs",
+            entity_id, end_aware - start_aware, len(states), len(out), t1 - t0,
+        )
         return out
 
 

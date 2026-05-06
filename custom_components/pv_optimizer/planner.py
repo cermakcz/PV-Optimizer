@@ -7,6 +7,7 @@ implementations backed by ``hass``.
 from __future__ import annotations
 
 import logging
+import time as _time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Protocol, Sequence
@@ -140,9 +141,14 @@ class Planner:
 
     # ---- public API ------------------------------------------------------
     def step(self, now: datetime) -> PlanCycle:
+        # Per-phase timing breadcrumbs at DEBUG so a slow cycle can be
+        # localised to inputs/solve/projection without external profiling.
+        t0 = _time.perf_counter()
         try:
             inputs = self._build_inputs(now)
+            t1 = _time.perf_counter()
             result = solve(inputs)
+            t2 = _time.perf_counter()
         except (OptimizerError, ValueError, KeyError, pulp.PulpError, OSError) as exc:
             _LOGGER.warning("Planning step failed: %s", exc)
             cycle = PlanCycle(now=now, result=None, applied_setpoint_w=None,
@@ -190,11 +196,17 @@ class Planner:
                           force_pv_export_enabled=force_pv_export_enabled,
                           error=None)
         self.last = cycle
+        t3 = _time.perf_counter()
+        _LOGGER.debug(
+            "planner.step: build_inputs=%.2fs solve=%.2fs post=%.2fs total=%.2fs",
+            t1 - t0, t2 - t1, t3 - t2, t3 - t0,
+        )
         return cycle
 
     # ---- input assembly --------------------------------------------------
     def _build_inputs(self, now: datetime) -> OptimizerInputs:
         cfg = self.config
+        ti0 = _time.perf_counter()
         soc_pct = self._read_float(cfg.battery_soc_entity)
         load_kw_now = self._read_float(cfg.load_power_entity) / 1000.0
 
@@ -217,6 +229,7 @@ class Planner:
             cfg.sell_price_tomorrow_entity, cfg.price_tomorrow_attr,
             first_start.date(),
         )
+        ti1 = _time.perf_counter()
         feedin_global = self._read_bool_optional(cfg.feedin_override_entity, default=True)
 
         slots: list[TariffSlot] = []
@@ -245,6 +258,7 @@ class Planner:
             slot_starts.append(start)
 
         pv_kw = self._read_pv_forecast(cfg.pv_forecast_entity, slot_starts, slot_h)
+        ti2 = _time.perf_counter()
         # Refine slot-0 PV against a measured trailing average so the active
         # force-export branch responds to clouds within one planner cycle.
         # ``min(forecast, live)`` is asymmetric on purpose: we only cut the
@@ -256,10 +270,17 @@ class Planner:
                 cfg.pv_power_entity, now - window, now)
             if live is not None:
                 pv_kw[0] = min(pv_kw[0], max(0.0, live))
+        ti3 = _time.perf_counter()
         load_kw = self._read_load_forecast(cfg.load_forecast_entity, slot_starts, slot_h, load_kw_now)
+        ti4 = _time.perf_counter()
         soc_kwh = max(cfg.battery.soc_min_kwh,
                       min(cfg.battery.soc_max_kwh,
                           soc_pct / 100.0 * cfg.battery.capacity_kwh))
+        _LOGGER.debug(
+            "planner.build_inputs: prices=%.2fs pv_forecast=%.2fs live_pv=%.2fs "
+            "load_forecast=%.2fs",
+            ti1 - ti0, ti2 - ti1, ti3 - ti2, ti4 - ti3,
+        )
 
         return OptimizerInputs(
             slots=slots, pv_kw=pv_kw, load_kw=load_kw,
