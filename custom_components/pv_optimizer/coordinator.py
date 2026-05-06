@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.components.recorder.history import state_changes_during_period
+from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -111,6 +112,88 @@ class _HassHistoryReader(HistoryReader):
         return out
 
 
+class _HassStatsHistoryReader(HistoryReader):
+    """Statistics-backed history reader for the load forecaster.
+
+    Reads the recorder's pre-aggregated mean buckets (5-minute or hourly,
+    depending on the planner's slot size) instead of every raw state
+    change. For a power sensor sampled every few seconds this is two to
+    three orders of magnitude fewer rows: 8 days of state changes can be
+    100k+ rows; the same window in 5-minute stats is ~2.3k, in hourly
+    stats ~190.
+
+    Each stats bucket is emitted as a synthetic step-wise sample at the
+    bucket start with the bucket's mean as the value. ``_bucket_average_kw``
+    treats step-wise samples as constant-until-next, so for contiguous
+    uniform buckets the per-slot time-weighted mean equals the simple mean
+    of the bucket means within that slot — which is exactly what we want.
+
+    Falls back transparently to per-state-change reads when the entity
+    has no statistics yet (e.g. missing ``state_class: measurement``, or
+    the recorder hasn't compiled its first batch). Logs a one-shot
+    warning per entity so the user knows why a cycle is slow.
+    """
+
+    def __init__(self, hass: HomeAssistant, period: str) -> None:
+        # ``period`` is one of ``"hour"`` / ``"5minute"`` and is picked at
+        # construction time from the planner's slot size: hourly stats are
+        # exactly aligned with hourly slots (one stat = one slot, the
+        # bucket mean is the slot mean), and 5-minute stats divide every
+        # planner-supported sub-hour slot evenly.
+        self._hass = hass
+        self._period = period
+        # Fallback path used when no statistics exist for an entity. Keeps
+        # the planner functional on entities lacking ``state_class``,
+        # at the cost of the original slow read.
+        self._fallback = _HassHistoryReader(hass)
+        self._warned_no_stats: set[str] = set()
+
+    def get_history(self, entity_id: str, start: datetime, end: datetime
+                    ) -> list[tuple[datetime, float]]:
+        start_aware = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start
+        end_aware = end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end
+        t0 = _time.perf_counter()
+        rows = statistics_during_period(
+            self._hass, start_aware, end_aware,
+            statistic_ids={entity_id}, period=self._period,
+            units=None, types={"mean"},
+        ).get(entity_id, [])
+        t1 = _time.perf_counter()
+        if not rows:
+            if entity_id not in self._warned_no_stats:
+                _LOGGER.warning(
+                    "no %s statistics for %s; falling back to per-state-change "
+                    "reads (much slower). Ensure the sensor exposes "
+                    "`state_class: measurement` and that the recorder has "
+                    "had time to compile its first stats batch.",
+                    self._period, entity_id,
+                )
+                self._warned_no_stats.add(entity_id)
+            return self._fallback.get_history(entity_id, start, end)
+        out: list[tuple[datetime, float]] = []
+        for row in rows:
+            mean = row.get("mean")
+            if mean is None:
+                continue
+            ts_field = row.get("start")
+            # Recent HA serialises bucket boundaries as unix floats; older
+            # versions returned ``datetime`` objects. Handle both.
+            if isinstance(ts_field, (int, float)):
+                ts = datetime.fromtimestamp(float(ts_field), tz=timezone.utc).replace(tzinfo=None)
+            elif isinstance(ts_field, datetime):
+                ts = (ts_field.astimezone(timezone.utc).replace(tzinfo=None)
+                      if ts_field.tzinfo is not None else ts_field)
+            else:
+                continue
+            out.append((ts, float(mean) / 1000.0))
+        _LOGGER.debug(
+            "stats.get_history %s period=%s window=%s -> %d rows / %d parsed in %.2fs",
+            entity_id, self._period, end_aware - start_aware,
+            len(rows), len(out), t1 - t0,
+        )
+        return out
+
+
 class _HassLiveAverager(LiveAverager):
     """Recorder-backed time-weighted average for the planner's slot-0 PV
     refinement. Reuses :class:`_HassHistoryReader`'s W→kW contract."""
@@ -167,6 +250,12 @@ class PvOptimizerCoordinator(DataUpdateCoordinator[PlanCycle]):
         # an external load_forecast_entity (escape hatch contract).
         if not config.load_forecast_entity and config.load_power_entity:
             opts = forecaster_opts or LoadForecasterOptions()
+            # Pick the coarsest stats period that still divides the slot:
+            # hourly when slots are >= 60 min (one stat per slot, exact),
+            # 5-minute otherwise. 5-minute stats are typically retained
+            # for ~``recorder.purge_keep_days`` (default 10), comfortably
+            # covering the default 7-day lookback.
+            stats_period = "hour" if config.slot_minutes >= 60 else "5minute"
             self.forecaster = LoadForecaster(
                 LoadForecasterConfig(
                     entity_id=config.load_power_entity,
@@ -175,7 +264,7 @@ class PvOptimizerCoordinator(DataUpdateCoordinator[PlanCycle]):
                     weekday_aware=opts.weekday_aware,
                     slot_minutes=config.slot_minutes,
                 ),
-                _HassHistoryReader(hass),
+                _HassStatsHistoryReader(hass, stats_period),
             )
         self._planner = Planner(
             config, _HassStateReader(hass), _HassServiceCaller(hass),
