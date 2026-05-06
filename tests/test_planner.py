@@ -430,6 +430,32 @@ def test_dict_price_format_top_level_iso_attributes() -> None:
     assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1e-3)
 
 
+def test_pv_forecast_solcast_detailed_hourly_shape() -> None:
+    # Solcast HACS integration exposes the forecast as ``detailedHourly``:
+    # a list of {period_start: <iso>, pv_estimate: <kW>} entries. The
+    # planner should accept this shape natively.
+    detailed_hourly = [
+        {"period_start": (NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00+00:00"),
+         "pv_estimate": 5.0,
+         "pv_estimate10": 3.5,
+         "pv_estimate90": 6.5}
+        for h in range(4)
+    ]
+    states = _states()
+    states["sensor.pv_forecast"] = StateView(
+        state="0", attributes={"detailedHourly": detailed_hourly})
+    planner = Planner(_config(), FakeReader(states), FakeCaller())
+
+    cycle = planner.step(NOW)
+
+    assert cycle.error is None
+    assert cycle.result is not None
+    # 5 kW PV - 1 kW load = 4 kW surplus → LP exports, feed-in on, passive setpoint.
+    first = cycle.result.slots[0]
+    assert first.p_sell_kw == pytest.approx(4.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
+    assert cycle.applied_feedin is True
+
 
 class _FakeHistory:
     """Step-wise history with a single constant value, density 15 minutes."""

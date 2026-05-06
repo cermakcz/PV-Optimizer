@@ -373,8 +373,11 @@ class Planner:
 
     def _read_pv_forecast(self, entity_id: str, slot_starts: list[datetime], slot_h: float) -> list[float]:
         st = self._state(entity_id)
-        # Accept either {"wh_hours": {"<iso>": Wh, ...}} (forecast.solar) or
-        # {"forecast": [{"datetime": "<iso>", "power_kw": <kW>}, ...]}.
+        # Accept any of:
+        #   * {"wh_hours": {"<iso>": Wh, ...}}                         (forecast.solar)
+        #   * {"forecast": [{"datetime": "<iso>", "power_kw": <kW>}]}  (generic)
+        #   * {"detailedHourly": [{"period_start": "<iso>",
+        #                          "pv_estimate": <kW>}, ...]}         (Solcast HACS)
         wh_hours = st.attributes.get("wh_hours")
         if isinstance(wh_hours, dict) and wh_hours:
             mapping = {_parse_iso(k): float(v) / 1000.0 / 1.0 for k, v in wh_hours.items()}
@@ -385,6 +388,15 @@ class Planner:
         if isinstance(forecast, list) and forecast:
             mapping = {_parse_iso(p["datetime"]): float(p.get("power_kw", p.get("power", 0)))
                        for p in forecast if "datetime" in p}
+            return [_lookup_forecast(mapping, s, slot_h) for s in slot_starts]
+        # Solcast: ``pv_estimate`` is the median (P50) average kW over the
+        # hour. Users wanting a conservative bias can build a template
+        # sensor that re-keys ``pv_estimate10`` under the same attribute.
+        detailed_hourly = st.attributes.get("detailedHourly")
+        if isinstance(detailed_hourly, list) and detailed_hourly:
+            mapping = {_parse_iso(p["period_start"]): float(p["pv_estimate"])
+                       for p in detailed_hourly
+                       if "period_start" in p and "pv_estimate" in p}
             return [_lookup_forecast(mapping, s, slot_h) for s in slot_starts]
         raise ValueError(f"PV forecast entity {entity_id!r} has no recognised attribute")
 
