@@ -35,14 +35,24 @@ series:
     type: area
     opacity: 0.4
     yaxis_id: savings
+    group_by:
+      func: avg
+      duration: 1h
   - entity: sensor.pv_optimizer_expected_cost_horizon
     name: Expected cost (horizon)
     color: "#e67e22"
     type: line
     yaxis_id: savings
+    group_by:
+      func: avg
+      duration: 1h
   - entity: sensor.pv_optimizer_planned_grid_setpoint
     name: Applied setpoint
     color: "#34495e"
     type: line
+    opacity: 0.2
     yaxis_id: setpoint
     stroke_width: 1
+    group_by:
+      func: avg
+      duration: 1h
