@@ -78,6 +78,22 @@ removing & re-adding the integration.
 > unit. Just keep buy price, sell price, and cycle cost in **the same**
 > currency.
 
+### Plug-and-play tariff integrations
+The following spot-price integrations work without any template-sensor
+glue — point the buy/sell entity fields at the listed sensors, leave the
+tomorrow fields blank unless noted, and you're done:
+
+| Integration | Sensor to use | Notes |
+|---|---|---|
+| [`cz_energy_spot_prices`](https://github.com/rnovacek/homeassistant_cz_energy_spot_prices) (rnovacek, Czech OTE) | `sensor.current_buy_electricity_price` / `sensor.current_sell_electricity_price` (or the bare `current_spot_*` if no buy/sell template is configured) | 60-minute interval only. Today + tomorrow live on one sensor; leave the tomorrow fields blank. The 15-minute variant is **not** supported (the planner hour-truncates keys, collapsing the four sub-hour entries into one). |
+| [`spot_hodinovy_tarif`](https://github.com/cermakcz/spot_hodinovy_tarif-ha) (Czech) | the integration's price sensor | Top-level ISO-keyed attributes; today + tomorrow on one sensor. |
+| [Nordpool](https://github.com/custom-components/nordpool) | the price sensor (any country/area) | Legacy `today` / `tomorrow` list-of-24 shape — matches the planner's default `price_today_attr` / `price_tomorrow_attr` of `today` / `tomorrow`. Use the tomorrow field as well. |
+
+Other integrations that publish either an ISO-keyed dict (under any
+attribute name) or a 24-element float list will also work via the
+auto-detection rules below — those three are just the ones explicitly
+covered by tests.
+
 ### Expected attribute shapes
 - **Hourly tariff sensors** — four shapes are auto-detected, tried in order:
   - `list[float]` of length 24 under the configured attribute name (default
@@ -91,12 +107,14 @@ removing & re-adding the integration.
     feels natural (`prices`, `raw_today`, …) without any planner config;
   - **top-level ISO-keyed attributes** — the entity's `attributes` dict itself
     is the price map, with each hour timestamp as its own attribute key (this
-    is what `spot_hodinovy_tarif` and similar plugins do). Unrelated metadata
-    keys are ignored.
+    is what `spot_hodinovy_tarif` and `cz_energy_spot_prices` do — both are
+    plug-and-play, point at `Current Buy/Sell Electricity Price` and leave
+    the tomorrow entity blank). Unrelated metadata keys are ignored.
 
   With any dict shape today's and tomorrow's hours may live on a single
-  entity (e.g. one 48-entry `prices` dict) or be split across today/tomorrow
-  entities — both work.
+  entity (e.g. one 48-entry `prices` dict, or `cz_energy_spot_prices`'
+  flat 48-key attribute set) or be split across today/tomorrow entities —
+  both work.
 
   **Staleness contract (dict shapes only):** if the *current* hour's key is
   missing, the planner refuses to run and records `last_error` rather than

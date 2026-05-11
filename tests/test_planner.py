@@ -428,6 +428,58 @@ def test_dict_price_format_top_level_iso_attributes() -> None:
     # set-point so the EMS doesn't drain the battery instead.
     assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1e-3)
 
+def test_dict_price_format_cz_energy_spot_prices_shape() -> None:
+    # Plug-and-play check for rnovacek/homeassistant_cz_energy_spot_prices.
+    # That integration's ``Current Buy/Spot Electricity Price`` sensor exposes
+    # both today's and (when published) tomorrow's hourly prices as a single
+    # flat dict at the top of ``attributes``, keyed by Prague-local ISO 8601
+    # timestamps with offset, alongside the usual HA metadata. There is no
+    # wrapping attribute and no separate "tomorrow" sensor, so users should
+    # only have to fill in the today fields and leave tomorrow blank.
+    today_local_midnight_utc = datetime(2026, 4, 30, 22, 0)  # 2026-05-01 +02:00
+    iso_buy = {
+        _prague_iso(today_local_midnight_utc + timedelta(hours=h)): 0.30
+        for h in range(48)  # 24 today + 24 tomorrow on the same sensor
+    }
+    iso_sell = {k: 0.10 for k in iso_buy}
+    # Realistic HA metadata that the lenient ISO scan must skip.
+    cz_meta = {
+        "unit_of_measurement": "EUR/kWh",
+        "device_class": "monetary",
+        "state_class": "measurement",
+        "icon": "mdi:cash",
+        "friendly_name": "Current Buy Electricity Price",
+    }
+    buy_attrs = {**iso_buy, **cz_meta}
+    sell_attrs = {**iso_sell, **cz_meta, "friendly_name": "Current Sell Electricity Price"}
+
+    raw = {
+        "sensor.soc_pct": StateView(state="50", attributes={}),
+        "sensor.load_w": StateView(state="1000", attributes={}),
+        "sensor.pv_w": StateView(state="0", attributes={}),
+        "sensor.grid_w": StateView(state="0", attributes={}),
+        "sensor.buy": StateView(state="0.30", attributes=buy_attrs),
+        "sensor.sell": StateView(state="0.10", attributes=sell_attrs),
+        "sensor.pv_forecast": StateView(state="0", attributes={"wh_hours": {
+            (NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 0.0
+            for h in range(4)
+        }}),
+    }
+    # Default attr name (``today``) doesn't exist on the cz sensor; the
+    # top-level fallback scan is what makes this plug-and-play. No tomorrow
+    # entity is configured -- the today sensor already carries 48 h.
+    planner = Planner(_config(), FakeReader(raw), FakeCaller())
+
+    cycle = planner.step(NOW)
+
+    assert cycle.error is None
+    assert cycle.result is not None
+    assert len(cycle.result.slots) == 4
+    assert cycle.result.slots[0].p_buy_kw == pytest.approx(1.0, abs=1e-3)
+    assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1e-3)
+
+
+
 
 def test_pv_forecast_solcast_detailed_hourly_shape() -> None:
     # Solcast HACS integration exposes the forecast as ``detailedHourly``:
