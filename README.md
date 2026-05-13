@@ -78,10 +78,11 @@ removing & re-adding the integration.
 > unit. Just keep buy price, sell price, and cycle cost in **the same**
 > currency.
 
-### Plug-and-play tariff integrations
-The following spot-price integrations work without any template-sensor
-glue — point the buy/sell entity fields at the listed sensors, leave the
-tomorrow fields blank unless noted, and you're done:
+### Plug-and-play integrations
+Point the relevant entity fields at the sensors below — no template-sensor
+glue required.
+
+**Spot-price tariffs** — buy/sell price entities:
 
 | Integration | Sensor to use | Notes |
 |---|---|---|
@@ -89,10 +90,16 @@ tomorrow fields blank unless noted, and you're done:
 | [`spot_hodinovy_tarif`](https://github.com/cermakcz/spot_hodinovy_tarif-ha) (Czech) | the integration's price sensor | Top-level ISO-keyed attributes; today + tomorrow on one sensor. |
 | [Nordpool](https://github.com/custom-components/nordpool) | the price sensor (any country/area) | Legacy `today` / `tomorrow` list-of-24 shape — matches the planner's default `price_today_attr` / `price_tomorrow_attr` of `today` / `tomorrow`. Use the tomorrow field as well. |
 
-Other integrations that publish either an ISO-keyed dict (under any
-attribute name) or a 24-element float list will also work via the
-auto-detection rules below — those three are just the ones explicitly
-covered by tests.
+**PV forecast** — multi-select PV forecast entity field:
+
+| Integration | Sensor(s) to use | Notes |
+|---|---|---|
+| [Solcast PV Forecast (HACS)](https://github.com/BJReplay/ha-solcast-solar) | `sensor.solcast_pv_forecast_forecast_today` **and** `sensor.solcast_pv_forecast_forecast_tomorrow` | Read from `detailedHourly`; both sensors must be selected to cover the full ~48 h horizon. The planner accepts `period_start` as either a tz-aware `datetime` (Solcast's native shape) or an ISO string. |
+| [Forecast.Solar](https://www.home-assistant.io/integrations/forecast_solar/) (HA core) | the integration's energy-forecast sensor (`sensor.energy_production_today` or similar) | Read from the `wh_hours` attribute (`{iso_hour: Wh}`). Today + tomorrow live on one sensor. |
+
+Other integrations that publish one of the auto-detected shapes (see
+*Expected attribute shapes* below) will also work — these are just the
+ones explicitly covered by tests.
 
 ### Expected attribute shapes
 - **Hourly tariff sensors** — four shapes are auto-detected, tried in order:
