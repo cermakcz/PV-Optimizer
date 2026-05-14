@@ -88,6 +88,15 @@ class _ExpectedCostSensor(_Base):
         c = self._cycle
         return None if c is None or c.result is None else round(c.result.total_cost, 4)
 
+    @property
+    def extra_state_attributes(self) -> dict[str, float | None]:
+        c = self._cycle
+        if c is None or c.result is None or not c.result.slots:
+            return {"horizon_hours": None}
+        n = len(c.result.slots)
+        h = round(n * c.result.slots[0].duration_h, 2)
+        return {"horizon_hours": h}
+
 
 class _SavingsSensor(_Base):
     def __init__(self, coord: PvOptimizerCoordinator) -> None:
