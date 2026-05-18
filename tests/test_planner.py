@@ -479,6 +479,29 @@ def test_dict_price_format_cz_energy_spot_prices_shape() -> None:
     assert cycle.applied_setpoint_w == pytest.approx(1000.0, abs=1e-3)
 
 
+def test_scalar_price_fills_all_slots() -> None:
+    # Fixed-rate tariff: entity state is a plain number, no attributes with
+    # price data. The planner should fill every slot with that constant value.
+    raw = {
+        "sensor.soc_pct": StateView(state="50", attributes={}),
+        "sensor.load_w": StateView(state="1000", attributes={}),
+        "sensor.pv_w": StateView(state="0", attributes={}),
+        "sensor.grid_w": StateView(state="0", attributes={}),
+        "sensor.buy": StateView(state="0.25", attributes={}),
+        "sensor.sell": StateView(state="0.08", attributes={}),
+        "sensor.pv_forecast": StateView(state="0", attributes={"wh_hours": {
+            (NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): 0.0
+            for h in range(4)
+        }}),
+    }
+    planner = Planner(_config(), FakeReader(raw), FakeCaller())
+    cycle = planner.step(NOW)
+
+    assert cycle.error is None
+    assert cycle.result is not None
+    assert len(cycle.result.slots) == 4
+    # All slots should carry the flat buy/sell price from the scalar state.
+    assert cycle.result.slots[0].p_buy_kw == pytest.approx(1.0, abs=1e-3)
 
 
 def test_pv_forecast_solcast_detailed_hourly_shape() -> None:

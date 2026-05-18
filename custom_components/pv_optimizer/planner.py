@@ -313,7 +313,7 @@ class Planner:
                            default_date) -> dict[datetime, float]:
         """Read one price entity.
 
-        Four shapes are accepted, tried in order:
+        Five shapes are accepted, tried in order:
         * ``attributes[attr]`` is a ``dict[iso_timestamp, float]`` (wrapped),
         * ``attributes[attr]`` is a ``list[float]`` of 24 hourly prices,
         * any *other* dict-valued attribute looks like an ISO-keyed price map
@@ -322,6 +322,8 @@ class Planner:
         * the entity exposes hour timestamps as *top-level* attribute keys
           (``attributes`` itself is the price map). This is what plugins like
           ``spot_hodinovy_tarif`` do — there is no wrapping attribute.
+        * the entity's ``state`` is a plain number — used as a flat price for
+          every slot in the horizon (useful for fixed-rate tariffs).
         """
         st = self._state(entity_id)
         raw = st.attributes.get(attr)
@@ -346,9 +348,19 @@ class Planner:
         scanned = self._parse_iso_keyed_dict(st.attributes, lenient=True)
         if scanned:
             return scanned
+        # Scalar fallback: entity state is a plain number — fill every hour
+        # in a 48 h window (today + tomorrow) with the same flat price.
+        if st.state not in (None, "", "unknown", "unavailable"):
+            try:
+                flat = float(st.state)
+                return {datetime.combine(default_date + timedelta(days=d), time(hour=h)): flat
+                        for d in range(2) for h in range(24)}
+            except (TypeError, ValueError):
+                pass
         raise ValueError(
             f"entity {entity_id!r} attribute {attr!r} missing or unsupported shape "
-            "(expected list[float], dict[iso_timestamp, float], or iso-keyed attributes)"
+            "(expected list[float], dict[iso_timestamp, float], iso-keyed attributes, "
+            "or a scalar state)"
         )
 
     @staticmethod

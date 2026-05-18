@@ -102,7 +102,7 @@ Other integrations that publish one of the auto-detected shapes (see
 ones explicitly covered by tests.
 
 ### Expected attribute shapes
-- **Hourly tariff sensors** — four shapes are auto-detected, tried in order:
+- **Hourly tariff sensors** — five shapes are auto-detected, tried in order:
   - `list[float]` of length 24 under the configured attribute name (default
     `today` / `tomorrow`; Nordpool/OTE legacy shape);
   - `dict[str, float]` under the configured attribute name, keyed by ISO 8601
@@ -116,7 +116,10 @@ ones explicitly covered by tests.
     is the price map, with each hour timestamp as its own attribute key (this
     is what `spot_hodinovy_tarif` and `cz_energy_spot_prices` do — both are
     plug-and-play, point at `Current Buy/Sell Electricity Price` and leave
-    the tomorrow entity blank). Unrelated metadata keys are ignored.
+    the tomorrow entity blank). Unrelated metadata keys are ignored;
+  - **scalar state** — the entity's `state` is a plain number (e.g.
+    `0.15`). Every slot in the horizon is filled with that constant value.
+    Useful for fixed-rate tariffs where the price never changes.
 
   With any dict shape today's and tomorrow's hours may live on a single
   entity (e.g. one 48-entry `prices` dict, or `cz_energy_spot_prices`'
