@@ -1,5 +1,8 @@
 # PV Optimizer
 
+> :warning: **Disclaimer:** The entire application is "vibe-coded" by "AI". Some
+> parts may not be fully tested.
+
 Home Assistant custom integration that minimises electricity cost for a
 PV + battery + grid system using **linear programming**. Designed for
 installations where the inverter/charger is controlled via a Victron Cerbo GX
@@ -8,6 +11,8 @@ already integrated with Home Assistant.
 > Detailed design: see [PRD.md](PRD.md).
 
 ![PV Optimizer plan](/dashboards/pv_optimizer_plan.png)
+
+
 
 ## What it does
 At every update tick the integration:
