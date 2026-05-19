@@ -39,7 +39,7 @@ class _Base(CoordinatorEntity[PvOptimizerCoordinator], SensorEntity):
     def __init__(self, coordinator: PvOptimizerCoordinator, key: str, name: str) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{key}" if coordinator.config_entry else key
-        self._attr_name = f"PV Optimizer {name}"
+        self._attr_name = f"PV LP Optimizer {name}"
 
     @property
     def _cycle(self) -> PlanCycle | None:

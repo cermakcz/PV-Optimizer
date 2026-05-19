@@ -1,4 +1,4 @@
-# PV Optimizer — Product Requirements Document
+# PV LP Optimizer — Product Requirements Document
 
 ## 1. Purpose
 A Home Assistant custom integration (`pv_optimizer`) that minimizes the total

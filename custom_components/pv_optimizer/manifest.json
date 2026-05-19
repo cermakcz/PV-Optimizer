@@ -1,6 +1,6 @@
 {
   "domain": "pv_optimizer",
-  "name": "PV Optimizer",
+  "name": "PV LP Optimizer",
   "version": "0.1.0",
   "documentation": "https://github.com/ocermak/pvlp-controller",
   "issue_tracker": "https://github.com/ocermak/pvlp-controller/issues",

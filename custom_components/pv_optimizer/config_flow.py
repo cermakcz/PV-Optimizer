@@ -159,7 +159,7 @@ class PvOptimizerConfigFlow(config_entries.ConfigFlow, domain=_DOMAIN):
     async def async_step_load_forecast(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
             self._data.update(user_input)
-            return self.async_create_entry(title="PV Optimizer", data=self._data)
+            return self.async_create_entry(title="PV LP Optimizer", data=self._data)
         return self.async_show_form(
             step_id="load_forecast", data_schema=_LOAD_FORECAST_SCHEMA,
         )

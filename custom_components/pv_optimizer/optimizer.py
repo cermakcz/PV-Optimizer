@@ -53,7 +53,7 @@ def _make_solver() -> "pulp.LpSolver":
         except Exception as exc:  # pragma: no cover - defensive
             _LOGGER.debug("Solver %s rejected at construction: %s", name, exc)
             continue
-        _LOGGER.info("PV Optimizer using LP solver: %s", name)
+        _LOGGER.info("PV LP Optimizer using LP solver: %s", name)
         _SOLVER_FACTORY = factory
         return solver
     raise OptimizerError(

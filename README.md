@@ -1,4 +1,4 @@
-# PV Optimizer
+# PV LP Optimizer
 
 > :warning: **Disclaimer:** The entire application is "vibe-coded" by "AI". Some
 > parts may not be fully tested.
@@ -62,7 +62,7 @@ PRD.md
 1. Copy `custom_components/pv_optimizer/` into your Home Assistant
    `config/custom_components/` directory (HACS-compatible repo layout).
 2. Restart Home Assistant.
-3. **Settings → Devices & Services → Add Integration → "PV Optimizer"**.
+3. **Settings → Devices & Services → Add Integration → "PV LP Optimizer"**.
 
 ## Charts
 Useful charts are in the [dashboards](/dashboards) directory.
