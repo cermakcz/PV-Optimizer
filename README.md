@@ -10,8 +10,10 @@ already integrated with Home Assistant.
 
 > Detailed design: see [PRD.md](PRD.md).
 
-![PV Optimizer plan](/dashboards/pv_optimizer_plan.png)
-
+<p>
+  <img src="/dashboards/pv_optimizer_plan.png" width="49%" alt="PV Optimizer plan" />
+  <img src="/dashboards/pv_optimizer_prices_setpoint.png" width="49%" alt="PV Optimizer Prices & Setpoint" />
+</p>
 
 
 ## What it does
