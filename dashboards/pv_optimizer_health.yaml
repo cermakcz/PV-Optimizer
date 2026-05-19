@@ -46,6 +46,61 @@ series:
     group_by:
       func: avg
       duration: 1h
+  - entity: sensor.grid_cost_revenue
+    name: Real cost (horizon ahead)
+    color: "#8e44ad"
+    type: line
+    yaxis_id: savings
+    # For each expected-cost data point at time T with its own
+    # horizon_hours H, look up grid_cost_revenue at T + H so the
+    # "what actually happened" line aligns with the prediction.
+    data_generator: |
+      const costId = 'sensor.pv_optimizer_expected_cost_horizon';
+      const gridId = 'sensor.grid_cost_revenue';
+      const [costHist, gridHist] = await Promise.all([
+        hass.callWS({
+          type: "history/history_during_period",
+          entity_ids: [costId],
+          start_time: start.toISOString(),
+          end_time: end.toISOString(),
+          minimal_response: true,
+          no_attributes: false
+        }),
+        hass.callWS({
+          type: "recorder/statistics_during_period",
+          statistic_ids: [gridId],
+          start_time: start.toISOString(),
+          end_time: new Date(end.getTime() + 48*3600000).toISOString(),
+          period: "5minute",
+          types: ["state"]
+        })
+      ]);
+      const grid = (gridHist[gridId] || [])
+        .map(r => [r.start, r.state])
+        .filter(p => p[1] != null)
+        .sort((a, b) => a[0] - b[0]);
+      if (!grid.length) return [];
+      function gridAt(ts) {
+        let lo = 0, hi = grid.length - 1, best = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (grid[mid][0] <= ts) { best = mid; lo = mid + 1; }
+          else hi = mid - 1;
+        }
+        return best >= 0 ? grid[best][1] : null;
+      }
+      return (costHist[costId] || [])
+        .map(r => {
+          const t = r.lu * 1000;
+          const h = parseFloat((r.a || {}).horizon_hours) || 24;
+          const tgtMs = t + h * 3600000;
+          if (tgtMs > Date.now()) return null;
+          const now = gridAt(t);
+          const future = gridAt(tgtMs);
+          if (now == null || future == null) return null;
+          return [t, future - now];
+        })
+        .filter(p => p !== null);
   - entity: sensor.pv_optimizer_planned_grid_setpoint
     name: Applied setpoint
     color: "#34495e"
