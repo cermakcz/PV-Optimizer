@@ -63,7 +63,7 @@ PRD.md
 3. **Settings → Devices & Services → Add Integration → "PV Optimizer"**.
 
 ## Charts
-Useful charts are in the [dashboards][/dashboards] directory.
+Useful charts are in the [dashboards](/dashboards) directory.
 
 ## Configuration
 Four steps in the UI:
