@@ -5,7 +5,9 @@ PV + battery + grid system using **linear programming**. Designed for
 installations where the inverter/charger is controlled via a Victron Cerbo GX
 already integrated with Home Assistant.
 
-> Detailed design: see [PRD.md](PRD.md). Implementation steps: [TASKS.md](TASKS.md).
+> Detailed design: see [PRD.md](PRD.md).
+
+![PV Optimizer plan](/dashboards/pv_optimizer_plan.png)
 
 ## What it does
 At every update tick the integration:
@@ -46,7 +48,7 @@ tests/
   test_optimizer.py
   test_planner.py
   test_load_forecaster.py
-PRD.md  TASKS.md
+PRD.md
 ```
 
 ## Installation
@@ -54,6 +56,9 @@ PRD.md  TASKS.md
    `config/custom_components/` directory (HACS-compatible repo layout).
 2. Restart Home Assistant.
 3. **Settings → Devices & Services → Add Integration → "PV Optimizer"**.
+
+## Charts
+Useful charts are in the [dashboards][/dashboards] directory.
 
 ## Configuration
 Four steps in the UI:
@@ -65,11 +70,10 @@ Four steps in the UI:
 | Solver   | Slot length (default 60 min), horizon (default 24 h), update interval (default 5 min), max grid import/export (kW), set-point write tolerance (W), **minimum sell price (currency/kWh; default 0)** — see *Minimum sell price* below. |
 | Load forecast | Lookback days (default 7), optional cap (kW; 0 = no cap), weekday-aware mode (default off). Skipped at runtime when an external `load_forecast_entity` was set in the Entities step. |
 
-Options flow re-exposes the **Battery + Solver + Load-forecast** knobs in a
+Options flow re-exposes the **Battery + Solver + Load-forecast** knobs and entities in a
 single combined screen (pre-filled with current values), so cycle cost,
 efficiencies, horizon, etc. can be tuned after install without re-adding the
-integration. Entity selections stay locked to the install — change them by
-removing & re-adding the integration.
+integration.
 
 > Currency note: the planner is currency-agnostic. All price-related fields
 > (cycle cost in config, the cost / savings diagnostic sensors) carry the
