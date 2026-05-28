@@ -121,11 +121,18 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
     # Terminal SoC (at end of horizon)
     prob += soc_end >= terminal, "soc_terminal"
 
-    # EV energy delivery: total charged energy must meet the target.
+    # Soft EV energy constraint: ev_deficit absorbs any shortfall so the LP
+    # stays feasible when capacity before deadline is genuinely insufficient
+    # (deadline too soon, plug-in too late).
+    ev_deficit = None
     if ev_active:
+        ev_deficit = pulp.LpVariable("ev_deficit", lowBound=0,
+                                     upBound=inputs.ev_target_kwh)
         prob += (
-            pulp.lpSum(p_ev[t] * dt[t] for t in range(n)) >= inputs.ev_target_kwh
-        ), "ev_delivery"
+            ev_deficit >= inputs.ev_target_kwh - pulp.lpSum(
+                inputs.slots[t].duration_h * p_ev[t] for t in range(n)
+            )
+        ), "ev_deficit_lb"
 
     # Optional soft "health" floor above ``soc_min``. For each slot we add
     # a slack ``deficit[t] >= max(0, soc_health - soc[t])`` and pay
@@ -192,6 +199,14 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
         cost_terms.append(
             dt[-1] * bat.low_soc_penalty_per_kwh_h * deficit_end
         )
+    if ev_active:
+        # Penalty must beat the highest realistic buy price so the LP
+        # prefers expensive grid over leaving the target unmet. 100x is
+        # a safe multiplier (real EV deficit values matter to the user
+        # at order-of-magnitude scale, not at the cent).
+        max_buy = max((s.price_buy for s in inputs.slots), default=1.0)
+        ev_deficit_penalty = 100.0 * max(max_buy, 0.01)
+        cost_terms.append(ev_deficit_penalty * ev_deficit)
     prob += pulp.lpSum(cost_terms)
 
     t0 = time.perf_counter()
@@ -225,13 +240,16 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
     ]
     total = float(pulp.value(prob.objective))
 
+    extras: dict = {"soc_end_kwh": float(soc_end.value() or 0.0)}
+    if ev_active and ev_deficit is not None:
+        extras["ev_deficit_kwh"] = float(ev_deficit.value() or 0.0)
     return OptimizerResult(
         slots=plan,
         total_cost=total,
         passive_cost=passive_cost(inputs),
         status=status_name,
         solve_time_s=solve_time,
-        extras={"soc_end_kwh": float(soc_end.value() or 0.0)},
+        extras=extras,
     )
 
 

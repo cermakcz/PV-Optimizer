@@ -464,3 +464,43 @@ def test_ev_respects_deadline_cuts_off_charging() -> None:
     assert r.slots[0].p_ev_chg_kw == pytest.approx(5.0, abs=1e-3)
     for sp in r.slots[1:]:
         assert sp.p_ev_chg_kw == pytest.approx(0.0, abs=1e-3)
+
+
+def test_ev_infeasible_deadline_uses_soft_slack() -> None:
+    """When the deadline is unachievable, the LP returns Optimal with a deficit.
+
+    Goal: don't raise OptimizerError; gracefully degrade. We ask for 100 kWh
+    in 1 slot of 11 kW capacity — physically impossible — and expect the LP
+    to deliver everything it can (11 kWh) and report the rest as deficit
+    via the result extras.
+    """
+    from custom_components.pv_optimizer.models import EVParams
+    bat = _battery(p_chg_max_kw=0.0, p_dis_max_kw=0.0)
+    slots = _slots([0.05, 0.05, 0.05, 0.05])
+    ev = EVParams(max_charging_power_kw=11.0, max_charging_current_a=16.0,
+                  min_charging_current_a=6.0, car_battery_kwh=60.0)
+    inp = OptimizerInputs(
+        slots, [0.0] * 4, [0.0] * 4, 1.0, bat, 25, 25,
+        ev=ev, ev_target_kwh=100.0, ev_deadline_index=1)
+    r = solve(inp)
+    assert r.status == "Optimal"
+    delivered = sum(sp.p_ev_chg_kw * sp.duration_h for sp in r.slots)
+    assert delivered == pytest.approx(11.0, abs=1e-3)
+    assert r.extras.get("ev_deficit_kwh") == pytest.approx(89.0, abs=1e-3)
+
+
+def test_ev_penalty_dominates_peak_buy_price() -> None:
+    """The LP prefers importing at peak price over leaving target unmet."""
+    from custom_components.pv_optimizer.models import EVParams
+    bat = _battery(p_chg_max_kw=0.0, p_dis_max_kw=0.0)
+    # Slot 0 is very expensive (1.0) but the only one before deadline.
+    slots = _slots([1.0, 0.05, 0.05, 0.05])
+    ev = EVParams(max_charging_power_kw=11.0, max_charging_current_a=16.0,
+                  min_charging_current_a=6.0, car_battery_kwh=60.0)
+    inp = OptimizerInputs(
+        slots, [0.0] * 4, [0.0] * 4, 1.0, bat, 25, 25,
+        ev=ev, ev_target_kwh=5.0, ev_deadline_index=1)
+    r = solve(inp)
+    # LP would rather pay 1.0 EUR/kWh than leave 5 kWh undelivered.
+    assert r.slots[0].p_ev_chg_kw == pytest.approx(5.0, abs=1e-3)
+    assert r.extras.get("ev_deficit_kwh", 0.0) == pytest.approx(0.0, abs=1e-3)
