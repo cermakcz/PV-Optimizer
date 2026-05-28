@@ -94,3 +94,63 @@ def decide_reactive(
     clamped = max(ev.min_charging_current_a,
                   min(ev.max_charging_current_a, target_a))
     return ReactiveDecision(max_current_a=int(clamped))
+
+
+@dataclass(frozen=True)
+class LatchState:
+    """Persistent state for the mode-switching reactive variant (§4.1)."""
+
+    cheap_grid: bool = False
+    ultimate_override: bool = False
+
+    @property
+    def any_set(self) -> bool:
+        return self.cheap_grid or self.ultimate_override
+
+
+def update_latches(
+    prev: LatchState,
+    *,
+    state_class: EVStateClass,
+    price_buy: float,
+    ev_charging_power_w: float,
+    last_state_class: EVStateClass,
+    time_in_current_class_s: float,
+    ev,
+) -> LatchState:
+    """Advance latches one tick per §4.1 trigger/release semantics.
+
+    Args:
+        prev: previous latch state.
+        state_class: current classified state of the charger.
+        price_buy: current buy price.
+        ev_charging_power_w: instantaneous EV charging power.
+        last_state_class: state class on the previous tick (used to
+            detect "leaves CONNECTED_REQUESTING" for the override release).
+        time_in_current_class_s: seconds the state has been in
+            ``state_class`` consecutively (the planner tracks this).
+        ev: EVParams.
+    """
+    # Cheap-grid: symmetric trigger/release on price threshold.
+    if price_buy <= ev.buy_price_threshold:
+        cheap_grid = True
+    else:
+        cheap_grid = False  # release on first tick above threshold
+
+    # Ultimate-override: asymmetric.
+    #   Trigger: state == REQUESTING AND ev_power < threshold.
+    #   Release: state has left REQUESTING for ≥ session_done_seconds.
+    if (state_class == EVStateClass.CONNECTED_REQUESTING
+            and ev_charging_power_w < ev.session_done_power_w):
+        ultimate_override = True
+    elif prev.ultimate_override:
+        if state_class == EVStateClass.CONNECTED_REQUESTING:
+            ultimate_override = True  # still requesting; hold
+        elif time_in_current_class_s >= ev.session_done_seconds:
+            ultimate_override = False
+        else:
+            ultimate_override = True
+    else:
+        ultimate_override = False
+
+    return LatchState(cheap_grid=cheap_grid, ultimate_override=ultimate_override)
