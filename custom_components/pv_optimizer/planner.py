@@ -355,6 +355,17 @@ class Planner:
         if cfg.ev is not None:
             target_kwh = self._read_float_optional(
                 cfg.ev.target_kwh_entity, default=0.0)
+            # Convenience input: a % entity lets users who don't know their
+            # car's kWh capacity off-hand express a target. We take the
+            # larger of the two so neither field has to be cleared when the
+            # other is set.
+            target_pct = self._read_float_optional(
+                cfg.ev.target_pct_entity, default=0.0)
+            if target_pct > 0:
+                target_kwh = max(
+                    target_kwh,
+                    (target_pct / 100.0) * cfg.ev.params.car_battery_kwh,
+                )
             deadline = self._read_datetime_optional(
                 cfg.ev.deadline_entity)
             connected = (
