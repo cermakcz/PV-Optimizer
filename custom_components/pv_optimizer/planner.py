@@ -343,11 +343,47 @@ class Planner:
         )
 
         self._cached_first_buy_price = slots[0].price_buy
+
+        # EV inputs (only when an EV config exists, the user has set a
+        # positive target, and a deadline lies inside the planning horizon).
+        ev_params = None
+        ev_target = 0.0
+        ev_deadline_idx = None
+        if cfg.ev is not None:
+            target_kwh = self._read_float_optional(
+                cfg.ev.target_kwh_entity, default=0.0)
+            deadline = self._read_datetime_optional(
+                cfg.ev.deadline_entity)
+            connected = (
+                classify_state(self._read_text(cfg.ev.charger_state_entity))
+                != EVStateClass.DISCONNECTED
+            )
+            session_done = self._session_energy_kwh(cfg.ev, now)
+            remaining = max(0.0, target_kwh - session_done)
+            if (connected and remaining > 0 and deadline is not None
+                    and deadline > now):
+                # Slot index nearest to (but not past) the deadline.
+                deadline_floor = _floor_to_slot(deadline, cfg.slot_minutes)
+                if deadline_floor > slot_starts[-1]:
+                    ev_deadline_idx = len(slot_starts)
+                else:
+                    # Inclusive of deadline_floor since charging in that hour is allowed.
+                    ev_deadline_idx = next(
+                        (i for i, s in enumerate(slot_starts) if s >= deadline_floor),
+                        len(slot_starts),
+                    )
+                if ev_deadline_idx > 0:
+                    ev_params = cfg.ev.params
+                    ev_target = remaining
+
         return OptimizerInputs(
             slots=slots, pv_kw=pv_kw, load_kw=load_kw,
             initial_soc_kwh=soc_kwh, battery=cfg.battery,
             p_grid_imp_max_kw=cfg.p_grid_imp_max_kw,
             p_grid_exp_max_kw=cfg.p_grid_exp_max_kw,
+            ev=ev_params,
+            ev_target_kwh=ev_target,
+            ev_deadline_index=ev_deadline_idx,
         )
 
     # ---- price source readers -------------------------------------------
@@ -469,6 +505,39 @@ class Planner:
         if st is None or st.state in (None, "", "unknown", "unavailable"):
             return default
         return str(st.state).lower() in ("on", "true", "1", "yes")
+
+    def _read_float_optional(self, entity_id: str | None, *,
+                             default: float) -> float:
+        if not entity_id:
+            return default
+        st = self.reader.get(entity_id)
+        if st is None or st.state in (None, "", "unknown", "unavailable"):
+            return default
+        try:
+            return float(st.state)
+        except (TypeError, ValueError):
+            return default
+
+    def _read_datetime_optional(self, entity_id: str | None
+                                 ) -> datetime | None:
+        if not entity_id:
+            return None
+        st = self.reader.get(entity_id)
+        if st is None or st.state in (None, "", "unknown", "unavailable"):
+            return None
+        try:
+            dt = _parse_iso(st.state)
+        except (TypeError, ValueError):
+            return None
+        return dt
+
+    def _session_energy_kwh(self, ev_cfg: EVConfig, now: datetime) -> float:
+        # Prefer the user-configured session-energy sensor; else use the
+        # internal integrator (Task 14).
+        if ev_cfg.session_energy_entity:
+            return self._read_float_optional(
+                ev_cfg.session_energy_entity, default=0.0)
+        return self.ev_state.session_energy_kwh if self.ev_state else 0.0
 
     def _read_pv_forecast(self, entity_id: str | Sequence[str],
                           slot_starts: list[datetime], slot_h: float) -> list[float]:

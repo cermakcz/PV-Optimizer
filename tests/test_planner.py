@@ -1170,6 +1170,41 @@ def test_planner_manual_mode_writes_max() -> None:
     assert starts and starts[-1][1] == "turn_on"
 
 
+def test_planner_engages_lp_when_target_and_deadline_set() -> None:
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    # Cheap slot 0 (0.05), expensive others (0.30); 4-h horizon.
+    states = _states(buy=[0.05] + [0.30] * 23)
+    states["sensor.ev_state"] = StateView(state="Connected")  # idle (not requesting)
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="5")
+    # Deadline 3h from NOW; planner stores it as exclusive index.
+    deadline = (NOW + timedelta(hours=3)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_deadline"] = StateView(state=deadline)
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    cycle = p.step(NOW)
+    # LP should plan EV charging in slot 0 (cheapest).
+    assert cycle.result is not None
+    assert cycle.result.slots[0].p_ev_chg_kw > 0
+    # And the planner should write a non-zero max-current.
+    writes = [c for c in p.caller.calls
+              if c[2].get("entity_id") == "number.ev_max_current"]
+    assert writes and writes[-1][2]["value"] >= 6
+
+
 def test_planner_manual_mode_auto_returns_on_disconnect() -> None:
     from custom_components.pv_optimizer.planner import EVConfig
     from custom_components.pv_optimizer.models import EVParams
