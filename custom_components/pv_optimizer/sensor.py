@@ -30,6 +30,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
     ]
     if coord.forecaster is not None:
         entities.append(_LoadForecastSensor(coord))
+    if coord.config.ev is not None:
+        entities.extend([
+            _EVStatusSensor(coord),
+            _EVSessionEnergySensor(coord),
+            _EVRemainingSensor(coord),
+            _EVPlannedCurrentSensor(coord),
+            _EVDeficitSensor(coord),
+        ])
     async_add_entities(entities)
 
 
@@ -180,6 +188,89 @@ class _LoadForecastSensor(_Base):
             "kw_per_slot": {naive_utc_to_iso(k): round(v, 3) for k, v in kw.items()},
             "days_used_per_slot": {naive_utc_to_iso(k): used.get(k, 0) for k in kw},
         }
+
+
+class _EVStatusSensor(_Base):
+    def __init__(self, coord: PvOptimizerCoordinator) -> None:
+        super().__init__(coord, "ev_status", "EV Status")
+
+    @property
+    def available(self) -> bool:
+        return self._cycle is not None
+
+    @property
+    def native_value(self) -> str | None:
+        c = self._cycle
+        if c is None:
+            return None
+        ev_state = getattr(self.coordinator._planner, "ev_state", None)
+        if ev_state is None or ev_state.last_state_class is None:
+            return "disconnected"
+        from .ev_controller import EVStateClass
+        if ev_state.last_state_class == EVStateClass.DISCONNECTED:
+            return "disconnected"
+        latches = ev_state.latches
+        if c.result and c.result.slots and c.result.slots[0].p_ev_chg_kw > 0:
+            return "charging_lp_planned"
+        if latches and getattr(latches, "ultimate_override", False):
+            return "charging_ultimate_override"
+        if latches and getattr(latches, "cheap_grid", False):
+            return "charging_cheap_grid"
+        if ev_state.last_written_current_a and ev_state.last_written_current_a > 0:
+            return "charging_surplus"
+        return "idle"
+
+
+class _EVSessionEnergySensor(_Base):
+    _attr_native_unit_of_measurement = "kWh"
+
+    def __init__(self, coord: PvOptimizerCoordinator) -> None:
+        super().__init__(coord, "ev_session_energy", "EV Session Energy")
+
+    @property
+    def native_value(self) -> float | None:
+        es = getattr(self.coordinator._planner, "ev_state", None)
+        return None if es is None else round(es.session_energy_kwh, 3)
+
+
+class _EVRemainingSensor(_Base):
+    _attr_native_unit_of_measurement = "kWh"
+
+    def __init__(self, coord: PvOptimizerCoordinator) -> None:
+        super().__init__(coord, "ev_remaining_kwh", "EV Remaining kWh")
+
+    @property
+    def native_value(self) -> float | None:
+        c = self._cycle
+        if c is None or c.result is None:
+            return None
+        return round(max(0.0, c.result.extras.get("ev_remaining_kwh", 0.0)), 3)
+
+
+class _EVPlannedCurrentSensor(_Base):
+    _attr_native_unit_of_measurement = "A"
+
+    def __init__(self, coord: PvOptimizerCoordinator) -> None:
+        super().__init__(coord, "ev_planned_current", "EV Planned Current")
+
+    @property
+    def native_value(self) -> int | None:
+        es = getattr(self.coordinator._planner, "ev_state", None)
+        return None if es is None else es.last_written_current_a
+
+
+class _EVDeficitSensor(_Base):
+    _attr_native_unit_of_measurement = "kWh"
+
+    def __init__(self, coord: PvOptimizerCoordinator) -> None:
+        super().__init__(coord, "ev_deficit_kwh", "EV Deficit kWh")
+
+    @property
+    def native_value(self) -> float | None:
+        c = self._cycle
+        if c is None or c.result is None:
+            return None
+        return round(c.result.extras.get("ev_deficit_kwh", 0.0), 3)
 
 
 def _slot_to_dict(s) -> dict[str, Any]:

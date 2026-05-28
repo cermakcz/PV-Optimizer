@@ -194,6 +194,7 @@ class Planner:
             EVRuntimeState(latches=LatchState()) if config.ev is not None else None
         )
         self._cached_first_buy_price: float = 0.0
+        self._cached_ev_remaining_kwh: float = 0.0
 
     # ---- public API ------------------------------------------------------
     def step(self, now: datetime) -> PlanCycle:
@@ -227,6 +228,8 @@ class Planner:
                          slots=_attach_physical_soc(
                              inputs, result.slots, _FORCE_EPS,
                              force_pv_export_enabled=force_pv_export_enabled))
+        if self.config.ev is not None:
+            result.extras["ev_remaining_kwh"] = self._cached_ev_remaining_kwh
 
         # Translate the LP plan for the next slot into inverter actions.
         # ``setpoint_w`` is precomputed per slot by ``_attach_physical_soc``
@@ -360,6 +363,7 @@ class Planner:
             )
             session_done = self._session_energy_kwh(cfg.ev, now)
             remaining = max(0.0, target_kwh - session_done)
+            self._cached_ev_remaining_kwh = remaining
             if (connected and remaining > 0 and deadline is not None
                     and deadline > now):
                 # Slot index nearest to (but not past) the deadline.
