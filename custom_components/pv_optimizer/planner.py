@@ -44,6 +44,11 @@ _LOGGER = logging.getLogger(__name__)
 # which slots are "active" vs "passive".
 _FORCE_EPS = 1e-3
 
+# HA can surface a state as None / empty / "unknown" / "unavailable" when an
+# entity has no value yet or has gone stale. All readers in this module treat
+# these the same way: as "no data, fall back to default / skip".
+_BAD_STATES: frozenset[str | None] = frozenset({None, "", "unknown", "unavailable"})
+
 
 @dataclass
 class EVRuntimeState:
@@ -54,6 +59,12 @@ class EVRuntimeState:
     state_class_since: datetime | None = None
     low_power_since: datetime | None = None
     last_written_current_a: int | None = None
+    # Idempotency caches: avoid re-firing the same service call every tick when
+    # the desired state hasn't changed. Reduces HA recorder churn and is also
+    # what allows the manual-mode session-done auto-return below to be a no-op
+    # on subsequent ticks once the mode flips back to "auto".
+    last_written_start: bool | None = None
+    last_written_charger_mode: str | None = None  # "active" or "passive"
     last_session_plug_in: datetime | None = None
     session_energy_kwh: float = 0.0
     last_charging_power_kw: float | None = None
@@ -101,7 +112,7 @@ class EVConfig:
     params: EVParams
     # Input entities (read by the planner).
     charger_state_entity: str
-    charging_power_entity: str  # W or kW; assume W if value > 100
+    charging_power_entity: str  # W by default; only treated as kW when unit_of_measurement == "kW"
     max_current_entity: str     # number entity (A) — output
     session_energy_entity: str | None = None
     start_switch_entity: str | None = None
@@ -462,7 +473,7 @@ class Planner:
             return scanned
         # Scalar fallback: entity state is a plain number — fill every hour
         # in a 48 h window (today + tomorrow) with the same flat price.
-        if st.state not in (None, "", "unknown", "unavailable"):
+        if st.state not in _BAD_STATES:
             try:
                 flat = float(st.state)
                 return {datetime.combine(default_date + timedelta(days=d), time(hour=h)): flat
@@ -509,7 +520,7 @@ class Planner:
 
     def _read_float(self, entity_id: str) -> float:
         st = self._state(entity_id)
-        if st.state in (None, "", "unknown", "unavailable"):
+        if st.state in _BAD_STATES:
             raise ValueError(f"entity {entity_id!r} has no numeric state")
         return float(st.state)
 
@@ -517,7 +528,7 @@ class Planner:
         if not entity_id:
             return default
         st = self.reader.get(entity_id)
-        if st is None or st.state in (None, "", "unknown", "unavailable"):
+        if st is None or st.state in _BAD_STATES:
             return default
         return str(st.state).lower() in ("on", "true", "1", "yes")
 
@@ -526,7 +537,7 @@ class Planner:
         if not entity_id:
             return default
         st = self.reader.get(entity_id)
-        if st is None or st.state in (None, "", "unknown", "unavailable"):
+        if st is None or st.state in _BAD_STATES:
             return default
         try:
             return float(st.state)
@@ -538,7 +549,7 @@ class Planner:
         if not entity_id:
             return None
         st = self.reader.get(entity_id)
-        if st is None or st.state in (None, "", "unknown", "unavailable"):
+        if st is None or st.state in _BAD_STATES:
             return None
         try:
             dt = _parse_iso(st.state)
@@ -679,14 +690,19 @@ class Planner:
             es.low_power_since = None
             low_power_s = 0.0
         # Manual mode: unconditional max + auto-return on session-done.
+        # Check session-done FIRST so a connected-but-finished car (or a
+        # disconnected one) flips back to auto without first firing a
+        # start/active/full-current write that the next tick would have to
+        # reverse anyway.
         if mode == "manual":
-            self._write_ev_current(cfg.params.max_charging_current_a)
-            self._write_ev_start(True)
-            self._write_ev_charger_mode_active()
             if is_session_done(state_class=state_class,
                                ev_charging_power_w=ev_power_w,
                                low_power_seconds=low_power_s, ev=cfg.params):
                 self._write_mode_auto()
+                return
+            self._write_ev_current(cfg.params.max_charging_current_a)
+            self._write_ev_start(True)
+            self._write_ev_charger_mode_active()
             return
         # Auto mode: dispatch on LP-plan presence.
         if plan_first.p_ev_chg_kw > 0:
@@ -738,7 +754,7 @@ class Planner:
         if not self.config.ev or not self.config.ev.mode_entity:
             return "auto"
         st = self.reader.get(self.config.ev.mode_entity)
-        if st is None or st.state in (None, "", "unknown", "unavailable"):
+        if st is None or st.state in _BAD_STATES:
             return "auto"
         return str(st.state).lower()
 
@@ -748,7 +764,7 @@ class Planner:
 
     def _read_charging_power_w(self, entity_id: str) -> float:
         st = self.reader.get(entity_id)
-        if st is None or st.state in (None, "", "unknown", "unavailable"):
+        if st is None or st.state in _BAD_STATES:
             return 0.0
         try:
             v = float(st.state)
@@ -781,24 +797,39 @@ class Planner:
         cfg = self.config.ev
         if cfg is None or not cfg.start_switch_entity:
             return
+        es = self.ev_state
+        if es is not None and es.last_written_start == on:
+            return
         service = "turn_on" if on else "turn_off"
         self.caller.call("switch", service, {"entity_id": cfg.start_switch_entity})
+        if es is not None:
+            es.last_written_start = on
 
     def _write_ev_charger_mode_active(self) -> None:
         cfg = self.config.ev
         if cfg is None or not cfg.charger_mode_entity:
             return
+        es = self.ev_state
+        if es is not None and es.last_written_charger_mode == "active":
+            return
         self.caller.call("select", "select_option", {
             "entity_id": cfg.charger_mode_entity, "option": "Manual",
         })
+        if es is not None:
+            es.last_written_charger_mode = "active"
 
     def _write_ev_charger_mode_passive(self) -> None:
         cfg = self.config.ev
         if cfg is None or not cfg.charger_mode_entity:
             return
+        es = self.ev_state
+        if es is not None and es.last_written_charger_mode == "passive":
+            return
         self.caller.call("select", "select_option", {
             "entity_id": cfg.charger_mode_entity, "option": "Auto",
         })
+        if es is not None:
+            es.last_written_charger_mode = "passive"
 
     def _write_mode_auto(self) -> None:
         cfg = self.config.ev
