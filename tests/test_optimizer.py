@@ -407,3 +407,60 @@ def test_optimizer_inputs_ev_deadline_must_be_in_range() -> None:
     with pytest.raises(ValueError):
         OptimizerInputs(slots, [1.0] * 4, [1.0] * 4, 5.0, bat, 10, 10,
                         ev=ev, ev_target_kwh=10.0, ev_deadline_index=5)
+
+
+# ---------------------------------------------------------------------------
+# EV LP variables (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def test_ev_no_target_creates_no_variables() -> None:
+    """When ev_target_kwh == 0, plan must equal the no-EV plan exactly."""
+    bat = _battery()
+    slots = _slots([0.2] * 4)
+    inp_noev = OptimizerInputs(slots, [1.0] * 4, [1.0] * 4, 5.0, bat, 10, 10)
+    r_noev = solve(inp_noev)
+    inp_evoff = OptimizerInputs(slots, [1.0] * 4, [1.0] * 4, 5.0, bat, 10, 10,
+                                ev_target_kwh=0.0)
+    r_evoff = solve(inp_evoff)
+    assert r_noev.total_cost == pytest.approx(r_evoff.total_cost, abs=1e-6)
+    for s_no, s_ev in zip(r_noev.slots, r_evoff.slots):
+        assert s_ev.p_ev_chg_kw == pytest.approx(0.0, abs=1e-6)
+        assert s_no.p_buy_kw == pytest.approx(s_ev.p_buy_kw, abs=1e-6)
+
+
+def test_ev_charges_before_deadline_from_grid() -> None:
+    """With no PV / no battery and one cheap hour, the LP charges EV in slot 0."""
+    from custom_components.pv_optimizer.models import EVParams
+    bat = _battery(p_chg_max_kw=0.0, p_dis_max_kw=0.0)  # disable home battery
+    slots = _slots([0.05, 0.30, 0.30, 0.30])  # slot 0 cheap, others expensive
+    ev = EVParams(max_charging_power_kw=11.0, max_charging_current_a=16.0,
+                  min_charging_current_a=6.0, car_battery_kwh=60.0)
+    inp = OptimizerInputs(
+        slots, [0.0] * 4, [0.0] * 4, 1.0, bat, 25, 25,
+        ev=ev, ev_target_kwh=10.0, ev_deadline_index=4)
+    r = solve(inp)
+    assert r.status == "Optimal"
+    # All 10 kWh should be delivered in slot 0 (cheapest, capacity >= 10).
+    delivered = sum(sp.p_ev_chg_kw * sp.duration_h for sp in r.slots)
+    assert delivered == pytest.approx(10.0, abs=1e-3)
+    assert r.slots[0].p_ev_chg_kw == pytest.approx(10.0, abs=1e-3)
+    for sp in r.slots[1:]:
+        assert sp.p_ev_chg_kw == pytest.approx(0.0, abs=1e-3)
+
+
+def test_ev_respects_deadline_cuts_off_charging() -> None:
+    """After deadline_index, p_ev_chg upper bound is 0."""
+    from custom_components.pv_optimizer.models import EVParams
+    bat = _battery(p_chg_max_kw=0.0, p_dis_max_kw=0.0)
+    # slot 0 expensive, slot 1 cheap (but deadline is at 1 so slot 1 disallowed)
+    slots = _slots([0.30, 0.05, 0.05, 0.05])
+    ev = EVParams(max_charging_power_kw=11.0, max_charging_current_a=16.0,
+                  min_charging_current_a=6.0, car_battery_kwh=60.0)
+    inp = OptimizerInputs(
+        slots, [0.0] * 4, [0.0] * 4, 1.0, bat, 25, 25,
+        ev=ev, ev_target_kwh=5.0, ev_deadline_index=1)
+    r = solve(inp)
+    assert r.slots[0].p_ev_chg_kw == pytest.approx(5.0, abs=1e-3)
+    for sp in r.slots[1:]:
+        assert sp.p_ev_chg_kw == pytest.approx(0.0, abs=1e-3)

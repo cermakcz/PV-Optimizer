@@ -87,15 +87,30 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
         soc.append(pulp.LpVariable(f"soc_{t}", lowBound=bat.soc_min_kwh, upBound=bat.soc_max_kwh))
     soc_end = pulp.LpVariable("soc_end", lowBound=bat.soc_min_kwh, upBound=bat.soc_max_kwh)
 
+    # EV charging variables. Created only when an EV target is set; the
+    # upper bound is the charger's max power for slots before the deadline,
+    # 0 elsewhere — outright disables the variable for out-of-window slots.
+    ev_active = inputs.ev is not None and inputs.ev_target_kwh > 0
+    p_ev: list = []
+    if ev_active:
+        for t in range(n):
+            ub = (inputs.ev.max_charging_power_kw
+                  if inputs.ev_deadline_index is not None
+                     and t < inputs.ev_deadline_index
+                  else 0.0)
+            p_ev.append(pulp.LpVariable(f"ev_{t}", lowBound=0, upBound=ub))
+    else:
+        p_ev = [0.0] * n  # constant zeros; PuLP handles mixed-numeric expressions
+
     # Initial SoC
     prob += soc[0] == inputs.initial_soc_kwh, "soc_init"
 
     # Per-slot constraints
     for t in range(n):
-        # Power balance: pv + p_dis + p_buy = load + p_chg + p_sell + p_curt
+        # Power balance: pv + p_dis + p_buy = load + p_ev + p_chg + p_sell + p_curt
         prob += (
             inputs.pv_kw[t] + p_dis[t] + p_buy[t]
-            == inputs.load_kw[t] + p_chg[t] + p_sell[t] + p_curt[t]
+            == inputs.load_kw[t] + p_ev[t] + p_chg[t] + p_sell[t] + p_curt[t]
         ), f"balance_{t}"
         # SoC dynamics
         next_soc = soc[t + 1] if t + 1 < n else soc_end
@@ -105,6 +120,12 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
 
     # Terminal SoC (at end of horizon)
     prob += soc_end >= terminal, "soc_terminal"
+
+    # EV energy delivery: total charged energy must meet the target.
+    if ev_active:
+        prob += (
+            pulp.lpSum(p_ev[t] * dt[t] for t in range(n)) >= inputs.ev_target_kwh
+        ), "ev_delivery"
 
     # Optional soft "health" floor above ``soc_min``. For each slot we add
     # a slack ``deficit[t] >= max(0, soc_health - soc[t])`` and pay
@@ -198,6 +219,7 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
             p_chg_kw=float(p_chg[t].value() or 0.0),
             p_dis_kw=float(p_dis[t].value() or 0.0),
             soc_start_kwh=float(soc[t].value() or 0.0),
+            p_ev_chg_kw=(float(p_ev[t].value() or 0.0) if ev_active else 0.0),
         )
         for t in range(n)
     ]
