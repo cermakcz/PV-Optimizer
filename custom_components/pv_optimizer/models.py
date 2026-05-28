@@ -142,5 +142,46 @@ class OptimizerResult:
         return self.passive_cost - self.total_cost
 
 
+@dataclass(frozen=True)
+class EVParams:
+    """Static EV-charger parameters. Brand-agnostic.
+
+    ``kw_per_amp`` is the only voltage/phase abstraction the optimizer
+    uses: it's derived from the user-declared (power, current) pair at
+    the charger's max-current setpoint and applied as a linear factor
+    everywhere. No phase or voltage math.
+    """
+
+    max_charging_power_kw: float
+    max_charging_current_a: float
+    min_charging_current_a: float
+    car_battery_kwh: float
+    current_tolerance_a: float = 1.0
+    session_done_power_w: float = 100.0
+    session_done_seconds: float = 60.0
+    buy_price_threshold: float = 0.0  # currency/kWh; reactive cheap-grid floor
+
+    def __post_init__(self) -> None:
+        if self.max_charging_power_kw <= 0:
+            raise ValueError("max_charging_power_kw must be > 0")
+        if self.max_charging_current_a <= 0:
+            raise ValueError("max_charging_current_a must be > 0")
+        if not (0 < self.min_charging_current_a <= self.max_charging_current_a):
+            raise ValueError(
+                "require 0 < min_charging_current_a <= max_charging_current_a")
+        if self.car_battery_kwh <= 0:
+            raise ValueError("car_battery_kwh must be > 0")
+        if self.current_tolerance_a < 0:
+            raise ValueError("current_tolerance_a must be >= 0")
+        if self.session_done_power_w < 0:
+            raise ValueError("session_done_power_w must be >= 0")
+        if self.session_done_seconds < 0:
+            raise ValueError("session_done_seconds must be >= 0")
+
+    @property
+    def kw_per_amp(self) -> float:
+        return self.max_charging_power_kw / self.max_charging_current_a
+
+
 class OptimizerError(RuntimeError):
     """Raised when the LP is infeasible or the solver fails."""

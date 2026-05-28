@@ -339,3 +339,36 @@ def test_solve_wraps_oserror_as_optimizer_error(monkeypatch) -> None:
     inp = OptimizerInputs(_slots([0.20]), [0.0], [1.0], 5.0, bat, 10, 10)
     with pytest.raises(OptimizerError, match="LP solver subprocess failed"):
         solve(inp)
+
+
+# ---------------------------------------------------------------------------
+# EVParams dataclass
+# ---------------------------------------------------------------------------
+
+
+def test_ev_params_validates_positive_power() -> None:
+    from custom_components.pv_optimizer.models import EVParams
+    with pytest.raises(ValueError):
+        EVParams(max_charging_power_kw=0.0, max_charging_current_a=16.0,
+                 min_charging_current_a=6.0, car_battery_kwh=60.0)
+
+
+def test_ev_params_validates_positive_current() -> None:
+    from custom_components.pv_optimizer.models import EVParams
+    with pytest.raises(ValueError):
+        EVParams(max_charging_power_kw=11.0, max_charging_current_a=0.0,
+                 min_charging_current_a=6.0, car_battery_kwh=60.0)
+
+
+def test_ev_params_kw_per_amp_derived() -> None:
+    from custom_components.pv_optimizer.models import EVParams
+    p = EVParams(max_charging_power_kw=8.0, max_charging_current_a=20.0,
+                 min_charging_current_a=6.0, car_battery_kwh=60.0)
+    assert p.kw_per_amp == pytest.approx(0.4)
+
+
+def test_ev_params_validates_min_below_max() -> None:
+    from custom_components.pv_optimizer.models import EVParams
+    with pytest.raises(ValueError):
+        EVParams(max_charging_power_kw=11.0, max_charging_current_a=16.0,
+                 min_charging_current_a=20.0, car_battery_kwh=60.0)
