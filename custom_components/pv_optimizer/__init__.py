@@ -17,8 +17,8 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
     """Set up pv_optimizer from a config entry (HA path)."""
     # Imports deferred so this module is import-safe without homeassistant.
     from .coordinator import LoadForecasterOptions, PvOptimizerCoordinator
-    from .models import BatteryParams
-    from .planner import PlannerConfig
+    from .models import BatteryParams, EVParams
+    from .planner import EVConfig, PlannerConfig
     from . import const as C
 
     data = {**entry.data, **entry.options}
@@ -42,6 +42,48 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
             data.get(C.CONF_BATTERY_LOW_SOC_PENALTY, C.DEFAULT_LOW_SOC_PENALTY)
         ),
     )
+    ev_state_entity = data.get(C.CONF_EV_CHARGER_STATE)
+    ev_power_entity = data.get(C.CONF_EV_CHARGING_POWER)
+    ev_current_entity = data.get(C.CONF_EV_MAX_CURRENT)
+    ev_max_kw = data.get(C.CONF_EV_MAX_CHARGING_POWER_KW)
+    ev_max_a = data.get(C.CONF_EV_MAX_CHARGING_CURRENT_A)
+    ev_car_kwh = data.get(C.CONF_EV_CAR_BATTERY_KWH)
+    ev_cfg: EVConfig | None = None
+    if (ev_state_entity and ev_power_entity and ev_current_entity
+            and ev_max_kw and ev_max_a and ev_car_kwh):
+        ev_params = EVParams(
+            max_charging_power_kw=float(ev_max_kw),
+            max_charging_current_a=float(ev_max_a),
+            min_charging_current_a=float(data.get(
+                C.CONF_EV_MIN_CHARGING_CURRENT_A,
+                C.DEFAULT_EV_MIN_CHARGING_CURRENT_A)),
+            car_battery_kwh=float(ev_car_kwh),
+            current_tolerance_a=float(data.get(
+                C.CONF_EV_CURRENT_TOLERANCE_A,
+                C.DEFAULT_EV_CURRENT_TOLERANCE_A)),
+            session_done_power_w=float(data.get(
+                C.CONF_EV_SESSION_DONE_POWER_W,
+                C.DEFAULT_EV_SESSION_DONE_POWER_W)),
+            session_done_seconds=float(data.get(
+                C.CONF_EV_SESSION_DONE_SECONDS,
+                C.DEFAULT_EV_SESSION_DONE_SECONDS)),
+            buy_price_threshold=float(data.get(
+                C.CONF_EV_BUY_PRICE_THRESHOLD,
+                C.DEFAULT_EV_BUY_PRICE_THRESHOLD)),
+        )
+        ev_cfg = EVConfig(
+            params=ev_params,
+            charger_state_entity=ev_state_entity,
+            charging_power_entity=ev_power_entity,
+            max_current_entity=ev_current_entity,
+            session_energy_entity=data.get(C.CONF_EV_SESSION_ENERGY),
+            start_switch_entity=data.get(C.CONF_EV_START_SWITCH),
+            charger_mode_entity=data.get(C.CONF_EV_CHARGER_MODE),
+            mode_entity="select.pv_optimizer_ev_mode",
+            target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+            target_pct_entity="number.pv_optimizer_ev_target_pct",
+            deadline_entity="datetime.pv_optimizer_ev_deadline",
+        )
     config = PlannerConfig(
         load_power_entity=data[C.CONF_LOAD_POWER],
         pv_power_entity=data[C.CONF_PV_POWER],
@@ -65,6 +107,7 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
         setpoint_tolerance_w=float(data[C.CONF_SETPOINT_TOLERANCE_W]),
         min_sell_price_per_kwh=float(data.get(C.CONF_MIN_SELL_PRICE,
                                               C.DEFAULT_MIN_SELL_PRICE)),
+        ev=ev_cfg,
     )
     cap_raw = float(data.get(C.CONF_LOAD_FORECAST_CAP_KW, C.DEFAULT_LOAD_FORECAST_CAP_KW))
     forecaster_opts = LoadForecasterOptions(
