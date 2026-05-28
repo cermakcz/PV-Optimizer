@@ -1021,6 +1021,34 @@ def test_force_hold_import_dormant_when_lp_discharges_battery() -> None:
     assert cycle.applied_setpoint_w == pytest.approx(0.0, abs=1e-3)
 
 
+def test_planner_config_ev_optional_when_unset() -> None:
+    """Existing planner construction with no EV inputs keeps working."""
+    cfg = _config()
+    assert cfg.ev is None
+
+
+def test_planner_config_with_ev_config() -> None:
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        session_energy_entity="sensor.ev_session_energy",
+        start_switch_entity="switch.ev_start",
+        charger_mode_entity="select.ev_mode",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        target_pct_entity="number.pv_optimizer_ev_target_pct",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    cfg = _config(ev=ev_cfg)
+    assert cfg.ev is ev_cfg
+
+
 def test_physical_soc_projection_stays_flat_under_force_hold_import() -> None:
     # Same scenario as the basic force-hold-import test: pure-load coverage
     # from the grid with battery idle. The physical-SoC projection must

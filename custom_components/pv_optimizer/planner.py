@@ -17,6 +17,7 @@ import pulp
 from .load_forecaster import LoadForecaster
 from .models import (
     BatteryParams,
+    EVParams,
     OptimizerError,
     OptimizerInputs,
     OptimizerResult,
@@ -61,6 +62,31 @@ class LiveAverager(Protocol):
 
     def average_kw(self, entity_id: str, since: datetime, until: datetime
                    ) -> float | None: ...
+
+
+@dataclass(frozen=True)
+class EVConfig:
+    """All EV-related entity bindings + static params bundled together.
+
+    A single ``EVConfig`` field on ``PlannerConfig`` keeps the EV surface
+    optional: when ``cfg.ev is None`` the planner does no EV work at all.
+    """
+
+    # Static parameters.
+    params: EVParams
+    # Input entities (read by the planner).
+    charger_state_entity: str
+    charging_power_entity: str  # W or kW; assume W if value > 100
+    max_current_entity: str     # number entity (A) — output
+    session_energy_entity: str | None = None
+    start_switch_entity: str | None = None
+    charger_mode_entity: str | None = None
+    # Integration-created entity ids (the planner reads these to learn
+    # the user's mode/target/deadline; HA layer owns their write side).
+    mode_entity: str = ""        # select.pv_optimizer_ev_mode
+    target_kwh_entity: str = ""  # number.pv_optimizer_ev_target_kwh
+    target_pct_entity: str = ""  # number.pv_optimizer_ev_target_pct
+    deadline_entity: str = ""    # datetime.pv_optimizer_ev_deadline
 
 
 @dataclass(frozen=True)
@@ -109,6 +135,7 @@ class PlannerConfig:
     # Attribute keys used to read hourly price arrays (Nordpool convention).
     price_today_attr: str = "today"
     price_tomorrow_attr: str = "tomorrow"
+    ev: EVConfig | None = None
 
 
 @dataclass
