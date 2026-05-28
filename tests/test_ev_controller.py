@@ -196,7 +196,7 @@ def test_cheap_grid_latch_trigger_and_release() -> None:
     s = update_latches(
         s, state_class=EVStateClass.CONNECTED_IDLE,
         price_buy=-0.05, ev_charging_power_w=0.0,
-        last_state_class=EVStateClass.CONNECTED_IDLE, time_in_current_class_s=0.0,
+        time_in_current_class_s=0.0,
         ev=ev,
     )
     assert s.cheap_grid
@@ -204,7 +204,7 @@ def test_cheap_grid_latch_trigger_and_release() -> None:
     s = update_latches(
         s, state_class=EVStateClass.CONNECTED_IDLE,
         price_buy=-0.05, ev_charging_power_w=0.0,
-        last_state_class=EVStateClass.CONNECTED_IDLE, time_in_current_class_s=300.0,
+        time_in_current_class_s=300.0,
         ev=ev,
     )
     assert s.cheap_grid
@@ -212,7 +212,7 @@ def test_cheap_grid_latch_trigger_and_release() -> None:
     s = update_latches(
         s, state_class=EVStateClass.CONNECTED_IDLE,
         price_buy=0.05, ev_charging_power_w=0.0,
-        last_state_class=EVStateClass.CONNECTED_IDLE, time_in_current_class_s=600.0,
+        time_in_current_class_s=600.0,
         ev=ev,
     )
     assert not s.cheap_grid
@@ -224,7 +224,7 @@ def test_ultimate_override_latch_triggers_on_denied_request() -> None:
     s = update_latches(
         s, state_class=EVStateClass.CONNECTED_REQUESTING,
         price_buy=0.50, ev_charging_power_w=0.0,
-        last_state_class=EVStateClass.CONNECTED_REQUESTING, time_in_current_class_s=10.0,
+        time_in_current_class_s=10.0,
         ev=ev,
     )
     assert s.ultimate_override
@@ -240,7 +240,7 @@ def test_ultimate_override_latch_does_not_flap_during_charge() -> None:
         LatchState(),
         state_class=EVStateClass.CONNECTED_REQUESTING,
         price_buy=0.50, ev_charging_power_w=0.0,
-        last_state_class=EVStateClass.CONNECTED_REQUESTING, time_in_current_class_s=10.0,
+        time_in_current_class_s=10.0,
         ev=ev,
     )
     assert s.ultimate_override
@@ -248,7 +248,7 @@ def test_ultimate_override_latch_does_not_flap_during_charge() -> None:
     s = update_latches(
         s, state_class=EVStateClass.CONNECTED_REQUESTING,
         price_buy=0.50, ev_charging_power_w=6000.0,
-        last_state_class=EVStateClass.CONNECTED_REQUESTING, time_in_current_class_s=300.0,
+        time_in_current_class_s=300.0,
         ev=ev,
     )
     assert s.ultimate_override
@@ -260,7 +260,7 @@ def test_ultimate_override_releases_after_dwell_out_of_requesting() -> None:
         LatchState(),
         state_class=EVStateClass.CONNECTED_REQUESTING,
         price_buy=0.50, ev_charging_power_w=0.0,
-        last_state_class=EVStateClass.CONNECTED_REQUESTING, time_in_current_class_s=10.0,
+        time_in_current_class_s=10.0,
         ev=ev,
     )
     assert s.ultimate_override
@@ -268,7 +268,7 @@ def test_ultimate_override_releases_after_dwell_out_of_requesting() -> None:
     s = update_latches(
         s, state_class=EVStateClass.CONNECTED_IDLE,
         price_buy=0.50, ev_charging_power_w=0.0,
-        last_state_class=EVStateClass.CONNECTED_IDLE, time_in_current_class_s=30.0,  # < session_done_seconds (60)
+        time_in_current_class_s=30.0,  # < session_done_seconds (60)
         ev=ev,
     )
     assert s.ultimate_override
@@ -276,7 +276,7 @@ def test_ultimate_override_releases_after_dwell_out_of_requesting() -> None:
     s = update_latches(
         s, state_class=EVStateClass.CONNECTED_IDLE,
         price_buy=0.50, ev_charging_power_w=0.0,
-        last_state_class=EVStateClass.CONNECTED_IDLE, time_in_current_class_s=120.0,
+        time_in_current_class_s=120.0,
         ev=ev,
     )
     assert not s.ultimate_override

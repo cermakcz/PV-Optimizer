@@ -114,7 +114,6 @@ def update_latches(
     state_class: EVStateClass,
     price_buy: float,
     ev_charging_power_w: float,
-    last_state_class: EVStateClass,
     time_in_current_class_s: float,
     ev,
 ) -> LatchState:
@@ -125,10 +124,10 @@ def update_latches(
         state_class: current classified state of the charger.
         price_buy: current buy price.
         ev_charging_power_w: instantaneous EV charging power.
-        last_state_class: state class on the previous tick (used to
-            detect "leaves CONNECTED_REQUESTING" for the override release).
         time_in_current_class_s: seconds the state has been in
             ``state_class`` consecutively (the planner tracks this).
+            The "left REQUESTING" release condition is detected via
+            ``state_class != REQUESTING`` combined with the dwell.
         ev: EVParams.
     """
     # Cheap-grid: symmetric trigger/release on price threshold.

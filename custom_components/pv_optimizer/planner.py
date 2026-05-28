@@ -699,7 +699,6 @@ class Planner:
                 state_class=state_class,
                 price_buy=price_buy,
                 ev_charging_power_w=ev_power_w,
-                last_state_class=es.last_state_class,
                 time_in_current_class_s=time_in_class,
                 ev=cfg.params,
             )
@@ -745,7 +744,7 @@ class Planner:
         except (TypeError, ValueError):
             return 0.0
         unit = str(st.attributes.get("unit_of_measurement", "")).lower()
-        if unit == "kw" or (unit == "" and 0 < v < 100):
+        if unit == "kw":
             return v * 1000.0
         return v
 
