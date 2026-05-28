@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
+from .const import BAD_STATES, DOMAIN
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
@@ -47,7 +47,7 @@ class _TargetKwh(RestoreEntity, NumberEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last and last.state not in (None, "", "unknown", "unavailable"):
+        if last and last.state not in BAD_STATES:
             try:
                 self._value = float(last.state)
             except ValueError:
@@ -80,7 +80,7 @@ class _TargetPct(RestoreEntity, NumberEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last and last.state not in (None, "", "unknown", "unavailable"):
+        if last and last.state not in BAD_STATES:
             try:
                 self._value = float(last.state)
             except ValueError:

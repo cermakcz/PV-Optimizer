@@ -4,6 +4,13 @@ from __future__ import annotations
 DOMAIN = "pv_optimizer"
 PLATFORMS = ["sensor", "number", "select", "datetime"]
 
+# HA surfaces a missing / pending / failed entity state as None / "" /
+# "unknown" / "unavailable". All readers in this integration treat these
+# the same way ("no data → fall back to default"). Centralised here so
+# the planner core, the HA platforms, and the restore-state paths can
+# share one definition.
+BAD_STATES: frozenset[str | None] = frozenset({None, "", "unknown", "unavailable"})
+
 # --- Configuration keys: input sensor entity ids ---
 CONF_LOAD_POWER = "load_power_entity"
 CONF_PV_POWER = "pv_power_entity"

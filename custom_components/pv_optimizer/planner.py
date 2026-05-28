@@ -14,6 +14,7 @@ from typing import Any, Protocol, Sequence
 
 import pulp
 
+from .const import BAD_STATES as _BAD_STATES
 from .ev_controller import (
     DEFAULT_STATE_VOCAB,
     EVStateClass,
@@ -43,11 +44,6 @@ _LOGGER = logging.getLogger(__name__)
 # discharge detection and the passive-projection helper so both agree on
 # which slots are "active" vs "passive".
 _FORCE_EPS = 1e-3
-
-# HA can surface a state as None / empty / "unknown" / "unavailable" when an
-# entity has no value yet or has gone stale. All readers in this module treat
-# these the same way: as "no data, fall back to default / skip".
-_BAD_STATES: frozenset[str | None] = frozenset({None, "", "unknown", "unavailable"})
 
 
 @dataclass
@@ -824,31 +820,41 @@ class Planner:
         if es is not None:
             es.last_written_start = on
 
-    def _write_ev_charger_mode_active(self) -> None:
+    # Per-role option string. Currently hardcoded; if non-EVCS chargers
+    # need different vocab (e.g. Zappi "Eco+"/"Stopped") this should
+    # move into EVConfig.
+    _CHARGER_MODE_OPTIONS = {"active": "Manual", "passive": "Auto"}
+
+    def _write_ev_charger_mode(self, role: str) -> None:
+        """Set the charger's own auto/manual mode entity.
+
+        ``role`` is the internal label ("active" / "passive") that we cache
+        idempotently; the option string sent to HA is looked up via
+        ``_CHARGER_MODE_OPTIONS``. When the mode actually changes we also
+        invalidate ``last_written_current_a`` because some charger firmwares
+        reset their internal current register on a mode transition, so the
+        next ``_write_ev_current`` must be allowed through even if the
+        target value is unchanged.
+        """
         cfg = self.config.ev
         if cfg is None or not cfg.charger_mode_entity:
             return
         es = self.ev_state
-        if es is not None and es.last_written_charger_mode == "active":
+        if es is not None and es.last_written_charger_mode == role:
             return
         self.caller.call("select", "select_option", {
-            "entity_id": cfg.charger_mode_entity, "option": "Manual",
+            "entity_id": cfg.charger_mode_entity,
+            "option": self._CHARGER_MODE_OPTIONS[role],
         })
         if es is not None:
-            es.last_written_charger_mode = "active"
+            es.last_written_charger_mode = role
+            es.last_written_current_a = None  # force next current write through
+
+    def _write_ev_charger_mode_active(self) -> None:
+        self._write_ev_charger_mode("active")
 
     def _write_ev_charger_mode_passive(self) -> None:
-        cfg = self.config.ev
-        if cfg is None or not cfg.charger_mode_entity:
-            return
-        es = self.ev_state
-        if es is not None and es.last_written_charger_mode == "passive":
-            return
-        self.caller.call("select", "select_option", {
-            "entity_id": cfg.charger_mode_entity, "option": "Auto",
-        })
-        if es is not None:
-            es.last_written_charger_mode = "passive"
+        self._write_ev_charger_mode("passive")
 
     def _write_mode_auto(self) -> None:
         cfg = self.config.ev
