@@ -14,6 +14,16 @@ from typing import Any, Protocol, Sequence
 
 import pulp
 
+from .ev_controller import (
+    DEFAULT_STATE_VOCAB,
+    EVStateClass,
+    LatchState,
+    classify_state,
+    decide_reactive,
+    is_session_done,
+    translate_lp_slot0,
+    update_latches,
+)
 from .load_forecaster import LoadForecaster
 from .models import (
     BatteryParams,
@@ -33,6 +43,21 @@ _LOGGER = logging.getLogger(__name__)
 # discharge detection and the passive-projection helper so both agree on
 # which slots are "active" vs "passive".
 _FORCE_EPS = 1e-3
+
+
+@dataclass
+class EVRuntimeState:
+    """Per-planner mutable EV state — latches + dwell timers."""
+
+    latches: "LatchState" = None
+    last_state_class: "EVStateClass" = None
+    state_class_since: datetime | None = None
+    low_power_since: datetime | None = None
+    last_written_current_a: int | None = None
+    last_session_plug_in: datetime | None = None
+    session_energy_kwh: float = 0.0
+    last_charging_power_kw: float | None = None
+    last_tick: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +190,10 @@ class Planner:
         # can't speculate above measured production.
         self.live_averager = live_averager
         self.last: PlanCycle | None = None
+        self.ev_state: EVRuntimeState | None = (
+            EVRuntimeState(latches=LatchState()) if config.ev is not None else None
+        )
+        self._cached_first_buy_price: float = 0.0
 
     # ---- public API ------------------------------------------------------
     def step(self, now: datetime) -> PlanCycle:
@@ -217,6 +246,10 @@ class Planner:
         prev_fi = self.last.applied_feedin if self.last else None
         if prev_fi is None or feedin != prev_fi:
             self._apply_feedin(feedin)
+
+        # EV control. Always last so it can read the latest first-slot price
+        # and the LP's p_ev_chg_kw decision.
+        self._apply_ev(now, result.slots[0])
 
         cycle = PlanCycle(now=now, result=result, applied_setpoint_w=setpoint_w,
                           applied_feedin=feedin,
@@ -309,6 +342,7 @@ class Planner:
             ti1 - ti0, ti2 - ti1, ti3 - ti2, ti4 - ti3,
         )
 
+        self._cached_first_buy_price = slots[0].price_buy
         return OptimizerInputs(
             slots=slots, pv_kw=pv_kw, load_kw=load_kw,
             initial_soc_kwh=soc_kwh, battery=cfg.battery,
@@ -509,6 +543,168 @@ class Planner:
             return
         service = "turn_on" if allowed else "turn_off"
         self.caller.call("switch", service, {"entity_id": self.config.feedin_switch_entity})
+
+    # ---- EV control -------------------------------------------------------
+
+    def _apply_ev(self, now: datetime, plan_first: SlotPlan) -> None:
+        cfg = self.config.ev
+        if cfg is None or self.ev_state is None:
+            return
+        mode = self._read_mode()  # "auto" / "manual" / "off"
+        if mode == "off":
+            return
+        # Read inputs.
+        raw_state = self._read_text(cfg.charger_state_entity)
+        state_class = classify_state(raw_state)
+        ev_power_w = self._read_charging_power_w(cfg.charging_power_entity)
+        price_buy = self._first_slot_buy_price()
+        grid_w = self._read_float(self.config.grid_power_entity)
+        # Update dwells.
+        es = self.ev_state
+        if es.last_state_class != state_class:
+            es.last_state_class = state_class
+            es.state_class_since = now
+        time_in_class = (
+            (now - es.state_class_since).total_seconds()
+            if es.state_class_since is not None else 0.0
+        )
+        if ev_power_w < cfg.params.session_done_power_w:
+            if es.low_power_since is None:
+                es.low_power_since = now
+            low_power_s = (now - es.low_power_since).total_seconds()
+        else:
+            es.low_power_since = None
+            low_power_s = 0.0
+        # Manual mode: unconditional max + auto-return on session-done.
+        if mode == "manual":
+            self._write_ev_current(cfg.params.max_charging_current_a)
+            self._write_ev_start(True)
+            self._write_ev_charger_mode_active()
+            if is_session_done(state_class=state_class,
+                               ev_charging_power_w=ev_power_w,
+                               low_power_seconds=low_power_s, ev=cfg.params):
+                self._write_mode_auto()
+            return
+        # Auto mode: dispatch on LP-plan presence.
+        if plan_first.p_ev_chg_kw > 0:
+            current = translate_lp_slot0(
+                p_ev_chg_kw=plan_first.p_ev_chg_kw,
+                state_class=state_class,
+                ev_charging_power_w=ev_power_w, ev=cfg.params,
+            )
+            self._write_ev_current(current)
+            self._write_ev_start(current > 0)
+            if current > 0:
+                self._write_ev_charger_mode_active()
+            else:
+                self._write_ev_charger_mode_passive()
+            return
+        # Reactive path.
+        if cfg.charger_mode_entity:
+            # Mode-switching variant: latches drive mode + max-current.
+            es.latches = update_latches(
+                es.latches,
+                state_class=state_class,
+                price_buy=price_buy,
+                ev_charging_power_w=ev_power_w,
+                last_state_class=es.last_state_class,
+                time_in_current_class_s=time_in_class,
+                ev=cfg.params,
+            )
+            if es.latches.any_set:
+                self._write_ev_charger_mode_active()
+                self._write_ev_current(cfg.params.max_charging_current_a)
+                self._write_ev_start(True)
+            else:
+                self._write_ev_charger_mode_passive()
+                self._write_ev_current(cfg.params.max_charging_current_a)
+        else:
+            # No mode entity: decide_reactive owns everything.
+            decision = decide_reactive(
+                state_class=state_class,
+                grid_power_w=grid_w,
+                ev_charging_power_w=ev_power_w,
+                price_buy=price_buy,
+                ev=cfg.params,
+            )
+            self._write_ev_current(decision.max_current_a)
+            self._write_ev_start(decision.max_current_a > 0)
+
+    # ---- EV helpers -------------------------------------------------------
+
+    def _read_mode(self) -> str:
+        if not self.config.ev or not self.config.ev.mode_entity:
+            return "auto"
+        st = self.reader.get(self.config.ev.mode_entity)
+        if st is None or st.state in (None, "", "unknown", "unavailable"):
+            return "auto"
+        return str(st.state).lower()
+
+    def _read_text(self, entity_id: str) -> str | None:
+        st = self.reader.get(entity_id)
+        return None if st is None else st.state
+
+    def _read_charging_power_w(self, entity_id: str) -> float:
+        st = self.reader.get(entity_id)
+        if st is None or st.state in (None, "", "unknown", "unavailable"):
+            return 0.0
+        try:
+            v = float(st.state)
+        except (TypeError, ValueError):
+            return 0.0
+        unit = str(st.attributes.get("unit_of_measurement", "")).lower()
+        if unit == "kw" or (unit == "" and 0 < v < 100):
+            return v * 1000.0
+        return v
+
+    def _first_slot_buy_price(self) -> float:
+        return self._cached_first_buy_price
+
+    def _write_ev_current(self, value_a: float) -> None:
+        cfg = self.config.ev
+        if cfg is None:
+            return
+        es = self.ev_state
+        new_val = int(round(value_a))
+        if es and es.last_written_current_a is not None:
+            if abs(new_val - es.last_written_current_a) <= cfg.params.current_tolerance_a:
+                return  # within tolerance
+        self.caller.call("number", "set_value", {
+            "entity_id": cfg.max_current_entity, "value": new_val,
+        })
+        if es is not None:
+            es.last_written_current_a = new_val
+
+    def _write_ev_start(self, on: bool) -> None:
+        cfg = self.config.ev
+        if cfg is None or not cfg.start_switch_entity:
+            return
+        service = "turn_on" if on else "turn_off"
+        self.caller.call("switch", service, {"entity_id": cfg.start_switch_entity})
+
+    def _write_ev_charger_mode_active(self) -> None:
+        cfg = self.config.ev
+        if cfg is None or not cfg.charger_mode_entity:
+            return
+        self.caller.call("select", "select_option", {
+            "entity_id": cfg.charger_mode_entity, "option": "Manual",
+        })
+
+    def _write_ev_charger_mode_passive(self) -> None:
+        cfg = self.config.ev
+        if cfg is None or not cfg.charger_mode_entity:
+            return
+        self.caller.call("select", "select_option", {
+            "entity_id": cfg.charger_mode_entity, "option": "Auto",
+        })
+
+    def _write_mode_auto(self) -> None:
+        cfg = self.config.ev
+        if cfg is None or not cfg.mode_entity:
+            return
+        self.caller.call("select", "select_option", {
+            "entity_id": cfg.mode_entity, "option": "auto",
+        })
 
 
 # ---------------------------------------------------------------------------

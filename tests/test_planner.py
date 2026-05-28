@@ -1049,6 +1049,69 @@ def test_planner_config_with_ev_config() -> None:
     assert cfg.ev is ev_cfg
 
 
+def test_planner_reads_ev_state_no_target_runs_reactive() -> None:
+    """When target=0, planner uses the reactive path: writes max_current."""
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_params = EVParams(
+        max_charging_power_kw=8.0, max_charging_current_a=20.0,
+        min_charging_current_a=6.0, car_battery_kwh=60.0,
+    )
+    ev_cfg = EVConfig(
+        params=ev_params,
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Charging")  # requesting
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    states["datetime.pv_optimizer_ev_deadline"] = StateView(state="")
+    reader, caller = FakeReader(states), FakeCaller()
+    cfg = _config(ev=ev_cfg)
+    p = Planner(cfg, reader, caller)
+    p.step(NOW)
+    # Reactive path with state=Charging -> ultimate-override -> max_current = 20.
+    ev_writes = [c for c in caller.calls if c[2].get("entity_id") == "number.ev_max_current"]
+    assert ev_writes, "planner should write to ev_max_current"
+    last = ev_writes[-1]
+    assert last == ("number", "set_value", {"entity_id": "number.ev_max_current", "value": 20})
+
+
+def test_planner_off_mode_writes_nothing_to_ev() -> None:
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Charging")
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="off")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    states["datetime.pv_optimizer_ev_deadline"] = StateView(state="")
+    reader, caller = FakeReader(states), FakeCaller()
+    p = Planner(_config(ev=ev_cfg), reader, caller)
+    p.step(NOW)
+    ev_writes = [c for c in caller.calls if c[2].get("entity_id") == "number.ev_max_current"]
+    assert ev_writes == [], "off mode must not write to ev_max_current"
+
+
 def test_physical_soc_projection_stays_flat_under_force_hold_import() -> None:
     # Same scenario as the basic force-hold-import test: pure-load coverage
     # from the grid with battery idle. The physical-SoC projection must
