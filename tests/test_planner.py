@@ -1233,6 +1233,88 @@ def test_planner_manual_mode_auto_returns_on_disconnect() -> None:
     assert mode_writes[-1][2]["option"] == "auto"
 
 
+def test_planner_manual_mode_holds_through_low_soc_pause() -> None:
+    """Manual must not auto-exit while EVCS is gating (e.g. low_soc) and
+    the car has never drawn power during this session — otherwise the
+    user's explicit force-charge intent is silently undone.
+    """
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        start_switch_entity="switch.ev_start",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="low_soc")  # IDLE per vocab
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["switch.ev_start"] = StateView(state="off")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="manual")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    # Step several ticks well past the session_done_seconds dwell (60s).
+    p.step(NOW)
+    p.step(NOW + timedelta(seconds=90))
+    p.step(NOW + timedelta(seconds=180))
+    mode_writes = [c for c in p.caller.calls
+                   if c[2].get("entity_id") == "select.pv_optimizer_ev_mode"]
+    assert not mode_writes, (
+        "manual should hold through EVCS low_soc gating when car has never charged"
+    )
+    current_writes = [c for c in p.caller.calls
+                      if c[2].get("entity_id") == "number.ev_max_current"]
+    assert current_writes and current_writes[-1][2]["value"] == 20
+
+
+def test_planner_manual_mode_auto_exits_after_real_session() -> None:
+    """Manual SHOULD auto-exit once the car has actually charged and then
+    stopped drawing for the session-done dwell — that's a finished session.
+    """
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        start_switch_entity="switch.ev_start",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Charging")
+    states["sensor.ev_power"] = StateView(state="6000")  # > session_done_power_w
+    states["number.ev_max_current"] = StateView(state="0")
+    states["switch.ev_start"] = StateView(state="off")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="manual")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    # Tick 1: car is charging — flag flips to True.
+    p.step(NOW)
+    # Now car finishes — state goes to IDLE-class ("Charged"), power drops.
+    states["sensor.ev_state"] = StateView(state="Charged")
+    states["sensor.ev_power"] = StateView(state="0")
+    # Tick 2: low-power dwell starts.
+    p.step(NOW + timedelta(seconds=30))
+    # Tick 3: dwell exceeds session_done_seconds (60).
+    p.step(NOW + timedelta(seconds=120))
+    mode_writes = [c for c in p.caller.calls
+                   if c[2].get("entity_id") == "select.pv_optimizer_ev_mode"]
+    assert mode_writes, "manual should auto-return once session truly done"
+    assert mode_writes[-1][2]["option"] == "auto"
+
+
 def test_planner_integrates_session_energy_when_no_sensor() -> None:
     """Without ev_session_energy_entity, planner integrates ev_charging_power_entity."""
     from custom_components.pv_optimizer.planner import EVConfig

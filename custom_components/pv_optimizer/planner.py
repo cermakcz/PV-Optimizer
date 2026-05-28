@@ -65,6 +65,12 @@ class EVRuntimeState:
     # on subsequent ticks once the mode flips back to "auto".
     last_written_start: bool | None = None
     last_written_charger_mode: str | None = None  # "active" or "passive"
+    # Tracks whether the car has drawn meaningful power (>= session_done_power_w)
+    # at any point during the current manual-mode session. Without this,
+    # manual mode would auto-exit on the IDLE+low-power dwell whenever the
+    # EVCS is gating (e.g. low_soc, waiting_for_*) — defeating the point of
+    # manual. Reset whenever we leave manual or the car disconnects.
+    manual_session_charging_seen: bool = False
     last_session_plug_in: datetime | None = None
     session_energy_kwh: float = 0.0
     last_charging_power_kw: float | None = None
@@ -689,15 +695,28 @@ class Planner:
         else:
             es.low_power_since = None
             low_power_s = 0.0
+        # Reset manual-session "charging seen" flag whenever we leave manual
+        # mode or the car goes away. Both transitions end the session
+        # whether or not it ever actually drew power.
+        if mode != "manual" or state_class == EVStateClass.DISCONNECTED:
+            es.manual_session_charging_seen = False
         # Manual mode: unconditional max + auto-return on session-done.
-        # Check session-done FIRST so a connected-but-finished car (or a
-        # disconnected one) flips back to auto without first firing a
-        # start/active/full-current write that the next tick would have to
-        # reverse anyway.
+        # DISCONNECTED is always exit. IDLE+low-power dwell is only exit if
+        # the car has actually drawn power during this manual session — otherwise
+        # we'd auto-exit whenever the EVCS is gating (e.g. low_soc), defeating
+        # the point of manual.
         if mode == "manual":
-            if is_session_done(state_class=state_class,
-                               ev_charging_power_w=ev_power_w,
-                               low_power_seconds=low_power_s, ev=cfg.params):
+            if ev_power_w >= cfg.params.session_done_power_w:
+                es.manual_session_charging_seen = True
+            disconnected_done = state_class == EVStateClass.DISCONNECTED
+            idle_done = (
+                es.manual_session_charging_seen
+                and is_session_done(state_class=state_class,
+                                    ev_charging_power_w=ev_power_w,
+                                    low_power_seconds=low_power_s,
+                                    ev=cfg.params)
+            )
+            if disconnected_done or idle_done:
                 self._write_mode_auto()
                 return
             self._write_ev_current(cfg.params.max_charging_current_a)
