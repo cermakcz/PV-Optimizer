@@ -1231,3 +1231,67 @@ def test_planner_manual_mode_auto_returns_on_disconnect() -> None:
                    if c[2].get("entity_id") == "select.pv_optimizer_ev_mode"]
     assert mode_writes, "manual mode should auto-return on disconnect"
     assert mode_writes[-1][2]["option"] == "auto"
+
+
+def test_planner_integrates_session_energy_when_no_sensor() -> None:
+    """Without ev_session_energy_entity, planner integrates ev_charging_power_entity."""
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Charging")
+    states["sensor.ev_power"] = StateView(state="2000")  # 2 kW
+    states["number.ev_max_current"] = StateView(state="0")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    p.step(NOW)
+    # Advance 30 min — integrator should be 2 kW * 0.5 h = 1.0 kWh.
+    p.step(NOW + timedelta(minutes=30))
+    assert p.ev_state is not None
+    assert p.ev_state.session_energy_kwh == pytest.approx(1.0, abs=1e-3)
+
+
+def test_planner_resets_session_energy_on_plug_in() -> None:
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Charging")
+    states["sensor.ev_power"] = StateView(state="2000")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    p.step(NOW)
+    p.step(NOW + timedelta(minutes=30))
+    assert p.ev_state.session_energy_kwh > 0
+    # Now unplug.
+    states["sensor.ev_state"] = StateView(state="Disconnected")
+    states["sensor.ev_power"] = StateView(state="0")
+    p.step(NOW + timedelta(hours=1))
+    # Plug back in.
+    states["sensor.ev_state"] = StateView(state="Connected")
+    p.step(NOW + timedelta(hours=2))
+    # Integrator must have reset on plug-in.
+    assert p.ev_state.session_energy_kwh == pytest.approx(0.0, abs=1e-3)

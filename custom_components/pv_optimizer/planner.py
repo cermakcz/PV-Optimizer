@@ -628,8 +628,27 @@ class Planner:
         ev_power_w = self._read_charging_power_w(cfg.charging_power_entity)
         price_buy = self._first_slot_buy_price()
         grid_w = self._read_float(self.config.grid_power_entity)
-        # Update dwells.
+        # Session energy integrator (only when user has no session_energy_entity).
         es = self.ev_state
+        if cfg.session_energy_entity is None and es is not None:
+            if (es.last_state_class == EVStateClass.DISCONNECTED
+                    and state_class != EVStateClass.DISCONNECTED):
+                # Plug-in transition — reset integrator.
+                es.session_energy_kwh = 0.0
+                es.last_charging_power_kw = None
+                es.last_tick = None
+            # Trapezoidal integration of ev_charging_power between ticks.
+            cur_kw = ev_power_w / 1000.0
+            if (es.last_tick is not None
+                    and es.last_charging_power_kw is not None
+                    and state_class != EVStateClass.DISCONNECTED):
+                dt_h = max(0.0,
+                           (now - es.last_tick).total_seconds() / 3600.0)
+                avg_kw = (es.last_charging_power_kw + cur_kw) / 2.0
+                es.session_energy_kwh += avg_kw * dt_h
+            es.last_tick = now
+            es.last_charging_power_kw = cur_kw
+        # Update dwells.
         if es.last_state_class != state_class:
             es.last_state_class = state_class
             es.state_class_since = now
