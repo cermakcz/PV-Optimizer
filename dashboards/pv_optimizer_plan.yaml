@@ -92,6 +92,24 @@ series:
     data_generator: |
       return (entity.attributes.slots || []).map((s) =>
         [new Date(s.start).getTime(), s.p_chg_kw - s.p_dis_kw]);
+  # EV-charging plan as a non-stacked line so it doesn't visually
+  # double-count against the grid column (the LP already folds EV draw
+  # into ``p_buy_kw``). Dashed to read as "planned".
+  - entity: sensor.pv_optimizer_plan
+    name: EV charging (planned)
+    type: line
+    color: "#16a085"
+    extend_to: false
+    yaxis_id: kw
+    unit: kW
+    curve: stepline
+    stroke_width: 2
+    stroke_dash: 6
+    show:
+      legend_value: false
+    data_generator: |
+      return (entity.attributes.slots || []).map((s) =>
+        [new Date(s.start).getTime(), Number(s.p_ev_chg_kw || 0)]);
   - entity: sensor.pv_optimizer_plan
     name: SoC
     type: line
