@@ -406,4 +406,4 @@ def test_optimizer_inputs_ev_deadline_must_be_in_range() -> None:
                   min_charging_current_a=6.0, car_battery_kwh=60.0)
     with pytest.raises(ValueError):
         OptimizerInputs(slots, [1.0] * 4, [1.0] * 4, 5.0, bat, 10, 10,
-                        ev=ev, ev_target_kwh=10.0, ev_deadline_index=4)
+                        ev=ev, ev_target_kwh=10.0, ev_deadline_index=5)

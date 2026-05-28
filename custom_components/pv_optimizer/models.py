@@ -105,9 +105,9 @@ class OptimizerInputs:
         if self.ev_target_kwh > 0 and self.ev is None:
             raise ValueError("ev_target_kwh > 0 requires ev params")
         if self.ev_deadline_index is not None and not (
-                0 <= self.ev_deadline_index < n):
+                0 <= self.ev_deadline_index <= n):
             raise ValueError(
-                f"ev_deadline_index must be in [0, {n}), got {self.ev_deadline_index}")
+                f"ev_deadline_index must be in [0, {n}], got {self.ev_deadline_index}")
 
 
 @dataclass(frozen=True)
