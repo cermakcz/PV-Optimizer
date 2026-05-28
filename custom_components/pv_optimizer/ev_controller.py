@@ -177,3 +177,36 @@ def is_session_done(
             and low_power_seconds >= ev.session_done_seconds):
         return True
     return False
+
+
+def translate_lp_slot0(
+    *,
+    p_ev_chg_kw: float,
+    state_class: EVStateClass,
+    ev_charging_power_w: float,
+    ev,
+) -> int:
+    """Convert the LP's slot-0 EV power into a charger max-current setpoint (A).
+
+    Per spec §5.3:
+    - If car is actively requesting AND not drawing meaningful power
+      (ev_charging_power_w < session_done_power_w), honour ultimate-override
+      with max current regardless of the LP plan.
+    - If LP plans zero, write zero.
+    - If LP plans > 0 but the converted current is below
+      ``min_charging_current_a``, clamp UP (contrast with reactive's
+      skip-below-min): the user has committed to a target, so a minor
+      slot-0 overshoot is acceptable. The next tick re-plans with reduced
+      remaining_kwh.
+    """
+    if (state_class == EVStateClass.CONNECTED_REQUESTING
+            and ev_charging_power_w < ev.session_done_power_w):
+        return int(round(ev.max_charging_current_a))
+    if state_class == EVStateClass.DISCONNECTED:
+        return 0
+    if p_ev_chg_kw <= 0:
+        return 0
+    target_a = p_ev_chg_kw / ev.kw_per_amp
+    clamped = max(ev.min_charging_current_a,
+                  min(ev.max_charging_current_a, target_a))
+    return int(round(clamped))

@@ -327,3 +327,68 @@ def test_session_not_done_when_still_requesting() -> None:
         state_class=EVStateClass.CONNECTED_REQUESTING,
         ev_charging_power_w=0.0, low_power_seconds=600.0, ev=ev,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 9: translate_lp_slot0
+# ---------------------------------------------------------------------------
+
+from custom_components.pv_optimizer.ev_controller import translate_lp_slot0
+
+
+def test_translate_disconnected_yields_zero() -> None:
+    ev = _ev()
+    assert translate_lp_slot0(
+        p_ev_chg_kw=0.0,
+        state_class=EVStateClass.DISCONNECTED,
+        ev_charging_power_w=0.0, ev=ev,
+    ) == 0
+
+
+def test_translate_lp_zero_yields_zero() -> None:
+    ev = _ev()
+    assert translate_lp_slot0(
+        p_ev_chg_kw=0.0,
+        state_class=EVStateClass.CONNECTED_IDLE,
+        ev_charging_power_w=0.0, ev=ev,
+    ) == 0
+
+
+def test_translate_lp_positive_above_min_converts_to_amps() -> None:
+    ev = _ev()
+    # 4 kW / 0.4 kw/A = 10 A.
+    assert translate_lp_slot0(
+        p_ev_chg_kw=4.0,
+        state_class=EVStateClass.CONNECTED_IDLE,
+        ev_charging_power_w=0.0, ev=ev,
+    ) == 10
+
+
+def test_translate_lp_below_min_clamps_up_to_floor() -> None:
+    """Contrast with reactive: LP path clamps up because user committed to a target."""
+    ev = _ev()
+    # 1 kW / 0.4 = 2.5 A < 6 A floor -> clamp UP.
+    assert translate_lp_slot0(
+        p_ev_chg_kw=1.0,
+        state_class=EVStateClass.CONNECTED_IDLE,
+        ev_charging_power_w=0.0, ev=ev,
+    ) == 6
+
+
+def test_translate_lp_above_max_clamps_down() -> None:
+    ev = _ev()
+    assert translate_lp_slot0(
+        p_ev_chg_kw=100.0,
+        state_class=EVStateClass.CONNECTED_IDLE,
+        ev_charging_power_w=0.0, ev=ev,
+    ) == 20
+
+
+def test_translate_ultimate_override_beats_lp_zero() -> None:
+    """Car requesting and not drawing -> max regardless of LP plan."""
+    ev = _ev()
+    assert translate_lp_slot0(
+        p_ev_chg_kw=0.0,
+        state_class=EVStateClass.CONNECTED_REQUESTING,
+        ev_charging_power_w=0.0, ev=ev,
+    ) == 20
