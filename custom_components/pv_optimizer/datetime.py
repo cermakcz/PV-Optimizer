@@ -24,6 +24,8 @@ class _DeadlineDateTime(RestoreEntity, DateTimeEntity):
     def __init__(self, entry_id: str) -> None:
         self._attr_unique_id = f"{entry_id}_ev_deadline"
         self._attr_name = "PV LP Optimizer EV Deadline"
+        # Pin entity_id to match what the planner reads.
+        self.entity_id = "datetime.pv_optimizer_ev_deadline"
         self._value: datetime | None = None
 
     @property

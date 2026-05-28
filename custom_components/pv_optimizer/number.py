@@ -31,6 +31,8 @@ class _TargetKwh(RestoreEntity, NumberEntity):
     def __init__(self, entry_id: str, cap: float) -> None:
         self._attr_unique_id = f"{entry_id}_ev_target_kwh"
         self._attr_name = "PV LP Optimizer EV Target kWh"
+        # Pin entity_id to match what the planner reads.
+        self.entity_id = "number.pv_optimizer_ev_target_kwh"
         self._attr_native_max_value = float(cap)
         self._value = 0.0
 
@@ -62,6 +64,8 @@ class _TargetPct(RestoreEntity, NumberEntity):
     def __init__(self, entry_id: str, cap: float) -> None:
         self._attr_unique_id = f"{entry_id}_ev_target_pct"
         self._attr_name = "PV LP Optimizer EV Target %"
+        # Pin entity_id to match what the planner reads.
+        self.entity_id = "number.pv_optimizer_ev_target_pct"
         self._cap = float(cap)
         self._value = 0.0
 

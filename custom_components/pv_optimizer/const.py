@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "pv_optimizer"
-PLATFORMS = ["sensor", "number", "select", "datetime", "switch"]
+PLATFORMS = ["sensor", "number", "select", "datetime"]
 
 # --- Configuration keys: input sensor entity ids ---
 CONF_LOAD_POWER = "load_power_entity"

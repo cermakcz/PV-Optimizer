@@ -25,6 +25,10 @@ class _EVModeSelect(RestoreEntity, SelectEntity):
     def __init__(self, entry_id: str) -> None:
         self._attr_unique_id = f"{entry_id}_ev_mode"
         self._attr_name = "PV LP Optimizer EV Mode"
+        # Pin the entity_id so the planner's hard-coded reads
+        # (select.pv_optimizer_ev_mode) line up regardless of the
+        # slug HA would derive from the friendly name.
+        self.entity_id = "select.pv_optimizer_ev_mode"
         self._state = "auto"
 
     @property
