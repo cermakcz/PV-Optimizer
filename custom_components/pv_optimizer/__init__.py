@@ -50,7 +50,9 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
     ev_car_kwh = data.get(C.CONF_EV_CAR_BATTERY_KWH)
     ev_cfg: EVConfig | None = None
     if (ev_state_entity and ev_power_entity and ev_current_entity
-            and ev_max_kw and ev_max_a and ev_car_kwh):
+            and ev_max_kw is not None
+            and ev_max_a is not None
+            and ev_car_kwh is not None):
         ev_params = EVParams(
             max_charging_power_kw=float(ev_max_kw),
             max_charging_current_a=float(ev_max_a),
