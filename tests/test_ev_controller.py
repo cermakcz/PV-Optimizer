@@ -25,9 +25,27 @@ def test_classify_connected_requesting_default_substrings() -> None:
     assert classify_state("WAIT RFID") == EVStateClass.CONNECTED_REQUESTING
 
 
+def test_classify_evcs_waiting_for_substrings() -> None:
+    """The EVCS HACS integration spells gated states as 'waiting_for_*'."""
+    assert classify_state("waiting_for_sun") == EVStateClass.CONNECTED_REQUESTING
+    assert classify_state("WAITING_FOR_START") == EVStateClass.CONNECTED_REQUESTING
+    assert classify_state("waiting_for_rfid") == EVStateClass.CONNECTED_REQUESTING
+    assert classify_state("waiting_for_time") == EVStateClass.CONNECTED_REQUESTING
+
+
 def test_classify_connected_idle_default_substrings() -> None:
     assert classify_state("Charged") == EVStateClass.CONNECTED_IDLE
     assert classify_state("Connected") == EVStateClass.CONNECTED_IDLE
+
+
+def test_classify_low_soc_is_idle() -> None:
+    """EVCS reports low_soc when home-battery preservation pauses charging.
+
+    It does NOT signal car-side request, so we treat it as IDLE and let the
+    LP plan or planner-manual mode decide whether to override the EVCS.
+    """
+    assert classify_state("low_soc") == EVStateClass.CONNECTED_IDLE
+    assert classify_state("LOW_SOC") == EVStateClass.CONNECTED_IDLE
 
 
 def test_classify_unknown_falls_back_to_connected_idle() -> None:

@@ -15,15 +15,31 @@ class EVStateClass(enum.Enum):
     CONNECTED_REQUESTING = "connected_requesting"
 
 
-# Default substring vocabulary. All matches are case-insensitive.
-# Precedence in classify_state: DISCONNECTED > CONNECTED_REQUESTING > CONNECTED_IDLE.
+# Default substring vocabulary. All matches are case-insensitive, plain
+# substring tests (no tokenisation). Precedence in classify_state:
+# DISCONNECTED > CONNECTED_REQUESTING > CONNECTED_IDLE.
+#
+# Needles must literally appear in the raw state. e.g. "wait_sun" does NOT
+# match "waiting_for_sun" — the EVCS HACS integration spells these as
+# "waiting_for_*", so we include the full form. Older / alternative
+# firmwares using "wait_sun" / "wait sun" are also covered.
 DEFAULT_STATE_VOCAB: Mapping[EVStateClass, Sequence[str]] = {
     EVStateClass.DISCONNECTED: ("disconnect", "idle", "unplug"),
     EVStateClass.CONNECTED_REQUESTING: (
-        "charging", "wait sun", "wait_sun",
+        "charging",
+        # EVCS HACS spellings.
+        "waiting_for_sun", "waiting_for_start",
+        "waiting_for_rfid", "waiting_for_time",
+        # Alternative firmware spellings.
+        "wait sun", "wait_sun",
         "wait time", "wait start", "wait rfid",
     ),
-    EVStateClass.CONNECTED_IDLE: ("charged", "connect"),
+    # "low_soc" is the EVCS-side pause when the home battery is below the
+    # user-configured floor. It's reported regardless of whether the car is
+    # currently asking for power, so we treat it as IDLE: the planner respects
+    # the EVCS's home-battery protection unless the LP plan or planner-manual
+    # mode explicitly overrides it.
+    EVStateClass.CONNECTED_IDLE: ("charged", "connect", "low_soc"),
 }
 
 _UNAVAILABLE_STATES = frozenset({"unknown", "unavailable", "none", ""})
