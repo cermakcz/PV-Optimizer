@@ -372,3 +372,38 @@ def test_ev_params_validates_min_below_max() -> None:
     with pytest.raises(ValueError):
         EVParams(max_charging_power_kw=11.0, max_charging_current_a=16.0,
                  min_charging_current_a=20.0, car_battery_kwh=60.0)
+
+
+# ---------------------------------------------------------------------------
+# OptimizerInputs EV extension (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_optimizer_inputs_ev_optional() -> None:
+    """Existing call sites (no EV) keep working — regression no-op."""
+    bat = _battery()
+    slots = _slots([0.2] * 4)
+    inp = OptimizerInputs(slots, [1.0] * 4, [1.0] * 4, 5.0, bat, 10, 10)
+    assert inp.ev is None
+    assert inp.ev_target_kwh == 0.0
+    assert inp.ev_deadline_index is None
+
+
+def test_optimizer_inputs_ev_target_requires_ev_params() -> None:
+    from custom_components.pv_optimizer.models import EVParams
+    bat = _battery()
+    slots = _slots([0.2] * 4)
+    with pytest.raises(ValueError):
+        OptimizerInputs(slots, [1.0] * 4, [1.0] * 4, 5.0, bat, 10, 10,
+                        ev_target_kwh=10.0, ev_deadline_index=2)
+
+
+def test_optimizer_inputs_ev_deadline_must_be_in_range() -> None:
+    from custom_components.pv_optimizer.models import EVParams
+    bat = _battery()
+    slots = _slots([0.2] * 4)
+    ev = EVParams(max_charging_power_kw=11.0, max_charging_current_a=16.0,
+                  min_charging_current_a=6.0, car_battery_kwh=60.0)
+    with pytest.raises(ValueError):
+        OptimizerInputs(slots, [1.0] * 4, [1.0] * 4, 5.0, bat, 10, 10,
+                        ev=ev, ev_target_kwh=10.0, ev_deadline_index=4)

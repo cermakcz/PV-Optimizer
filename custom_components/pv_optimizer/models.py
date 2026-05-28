@@ -73,6 +73,12 @@ class OptimizerInputs:
     p_grid_imp_max_kw: float
     p_grid_exp_max_kw: float
     terminal_soc_kwh: float | None = None  # default: initial_soc_kwh
+    # Optional EV charging extension. When all three are zero/None the
+    # LP creates no EV variables and behaves identically to pre-EV
+    # builds (regression no-op).
+    ev: "EVParams | None" = None
+    ev_target_kwh: float = 0.0
+    ev_deadline_index: int | None = None  # exclusive; charging allowed in slots [0, deadline_index)
 
     def __post_init__(self) -> None:
         n = len(self.slots)
@@ -94,6 +100,14 @@ class OptimizerInputs:
             <= self.battery.soc_max_kwh
         ):
             raise ValueError("terminal_soc out of [soc_min, soc_max]")
+        if self.ev_target_kwh < 0:
+            raise ValueError("ev_target_kwh must be >= 0")
+        if self.ev_target_kwh > 0 and self.ev is None:
+            raise ValueError("ev_target_kwh > 0 requires ev params")
+        if self.ev_deadline_index is not None and not (
+                0 <= self.ev_deadline_index < n):
+            raise ValueError(
+                f"ev_deadline_index must be in [0, {n}), got {self.ev_deadline_index}")
 
 
 @dataclass(frozen=True)
@@ -124,6 +138,7 @@ class SlotPlan:
     soc_start_kwh: float
     soc_physical_kwh: float | None = None
     setpoint_w: float | None = None
+    p_ev_chg_kw: float = 0.0   # EV charging power planned by the LP (or 0)
 
 
 @dataclass(frozen=True)
