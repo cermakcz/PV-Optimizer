@@ -55,11 +55,12 @@ class EVRuntimeState:
     state_class_since: datetime | None = None
     low_power_since: datetime | None = None
     last_written_current_a: int | None = None
-    # Idempotency caches: avoid re-firing the same service call every tick when
-    # the desired state hasn't changed. Reduces HA recorder churn and is also
-    # what allows the manual-mode session-done auto-return below to be a no-op
-    # on subsequent ticks once the mode flips back to "auto".
-    last_written_start: bool | None = None
+    # Tracks the previously written role ("active" / "passive") on the
+    # charger_mode select. Not used for dedupe — the mode write itself is
+    # unconditional so the planner self-corrects against firmware resets or
+    # external toggles — but used to detect *transitions*, which invalidate
+    # ``last_written_current_a`` because some charger firmwares reset their
+    # internal current register on a mode flip.
     last_written_charger_mode: str | None = None  # "active" or "passive"
     # Tracks whether the car has drawn meaningful power (>= session_done_power_w)
     # at any point during the current manual-mode session. Without this,
@@ -720,9 +721,13 @@ class Planner:
             if disconnected_done or idle_done:
                 self._write_mode_auto()
                 return
+            # Mode first so any mode-transition cache invalidation lands
+            # before the current write — otherwise the current would be
+            # written, then immediately have its cache cleared, and re-fire
+            # unnecessarily on the next tick.
+            self._write_ev_charger_mode_active()
             self._write_ev_current(cfg.params.max_charging_current_a)
             self._write_ev_start(True)
-            self._write_ev_charger_mode_active()
             return
         # Auto mode: dispatch on LP-plan presence.
         if plan_first.p_ev_chg_kw > 0:
@@ -731,12 +736,13 @@ class Planner:
                 state_class=state_class,
                 ev_charging_power_w=ev_power_w, ev=cfg.params,
             )
-            self._write_ev_current(current)
-            self._write_ev_start(current > 0)
+            # Same mode-first ordering rationale as the manual branch above.
             if current > 0:
                 self._write_ev_charger_mode_active()
             else:
                 self._write_ev_charger_mode_passive()
+            self._write_ev_current(current)
+            self._write_ev_start(current > 0)
             return
         # Reactive path.
         if cfg.charger_mode_entity:
@@ -814,24 +820,24 @@ class Planner:
             es.last_written_current_a = new_val
 
     def _write_ev_start(self, on: bool) -> None:
+        # Unconditional: write every tick so the planner self-corrects against
+        # firmware resets (EVCS clears the charging switch on Auto→Manual on
+        # some builds) and external user toggles. A switch service call is
+        # cheap; the logbook entry per planner tick is acceptable noise.
         cfg = self.config.ev
         if cfg is None or not cfg.start_switch_entity:
             return
-        es = self.ev_state
-        if es is not None and es.last_written_start == on:
-            return
         service = "turn_on" if on else "turn_off"
         self.caller.call("switch", service, {"entity_id": cfg.start_switch_entity})
-        if es is not None:
-            es.last_written_start = on
 
     def _write_ev_charger_mode(self, role: str) -> None:
         """Set the charger's own auto/manual mode entity.
 
-        ``role`` is the internal label ("active" / "passive") that we cache
-        idempotently; the option string sent to HA comes from EVConfig
-        (vendor-specific: EVCS uses "Manual"/"Auto", Zappi different).
-        When the mode actually changes we also invalidate
+        ``role`` is the internal label ("active" / "passive"); the option
+        string sent to HA comes from EVConfig (vendor-specific: EVCS uses
+        "Manual"/"Auto", Zappi different). Unconditional: we self-correct
+        against external mode toggles by writing every tick. When the role
+        differs from the previously written one we also invalidate
         ``last_written_current_a`` because some charger firmwares reset
         their internal current register on a mode transition, so the next
         ``_write_ev_current`` must be allowed through even if the target
@@ -840,18 +846,17 @@ class Planner:
         cfg = self.config.ev
         if cfg is None or not cfg.charger_mode_entity:
             return
-        es = self.ev_state
-        if es is not None and es.last_written_charger_mode == role:
-            return
         option = (cfg.charger_mode_option_active if role == "active"
                   else cfg.charger_mode_option_passive)
         self.caller.call("select", "select_option", {
             "entity_id": cfg.charger_mode_entity,
             "option": option,
         })
+        es = self.ev_state
         if es is not None:
+            if es.last_written_charger_mode != role:
+                es.last_written_current_a = None  # firmware may reset register
             es.last_written_charger_mode = role
-            es.last_written_current_a = None  # force next current write through
 
     def _write_ev_charger_mode_active(self) -> None:
         self._write_ev_charger_mode("active")

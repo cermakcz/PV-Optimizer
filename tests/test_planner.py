@@ -1170,6 +1170,53 @@ def test_planner_manual_mode_writes_max() -> None:
     assert starts and starts[-1][1] == "turn_on"
 
 
+def test_planner_manual_mode_writes_start_and_charger_mode_every_tick() -> None:
+    """The start-switch and charger-mode writes are unconditional so the
+    planner self-corrects against firmware resets (EVCS clears the charging
+    switch on Auto→Manual on some builds) and external user toggles. The
+    current write keeps its dedupe — number entities are noisier in the
+    recorder and we have explicit mode-flip invalidation instead.
+    """
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        start_switch_entity="switch.ev_start",
+        charger_mode_entity="select.ev_mode",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Connected")
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["switch.ev_start"] = StateView(state="off")
+    states["select.ev_mode"] = StateView(state="Auto")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="manual")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    for i in range(3):
+        p.step(NOW + timedelta(seconds=300 * i))
+    starts = [c for c in p.caller.calls
+              if c[2].get("entity_id") == "switch.ev_start"]
+    mode_writes = [c for c in p.caller.calls
+                   if c[2].get("entity_id") == "select.ev_mode"]
+    current_writes = [c for c in p.caller.calls
+                      if c[2].get("entity_id") == "number.ev_max_current"]
+    assert len(starts) == 3, "start switch must be written every tick"
+    assert all(s[1] == "turn_on" for s in starts)
+    assert len(mode_writes) == 3, "charger mode must be written every tick"
+    assert all(m[2]["option"] == "Manual" for m in mode_writes)
+    # Current stays deduped (target unchanged, role unchanged).
+    assert len(current_writes) == 1, "current write keeps idempotent dedupe"
+
+
 def test_planner_engages_lp_when_target_and_deadline_set() -> None:
     from custom_components.pv_optimizer.planner import EVConfig
     from custom_components.pv_optimizer.models import EVParams
