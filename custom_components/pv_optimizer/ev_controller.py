@@ -24,7 +24,12 @@ class EVStateClass(enum.Enum):
 # "waiting_for_*", so we include the full form. Older / alternative
 # firmwares using "wait_sun" / "wait sun" are also covered.
 DEFAULT_STATE_VOCAB: Mapping[EVStateClass, Sequence[str]] = {
-    EVStateClass.DISCONNECTED: ("disconnect", "idle", "unplug"),
+    # "idle" deliberately omitted: it appears inside connected-but-not-charging
+    # state names like "charging_idle" / "connected_idle" on some firmwares
+    # (Wallbox, SMA), and substring precedence would mis-route those to
+    # DISCONNECTED. A bare "idle" state falls to the conservative
+    # CONNECTED_IDLE fallback, which is safe.
+    EVStateClass.DISCONNECTED: ("disconnect", "unplug"),
     EVStateClass.CONNECTED_REQUESTING: (
         "charging",
         # EVCS HACS spellings.
@@ -109,6 +114,9 @@ def decide_reactive(
         return ReactiveDecision(max_current_a=0)
     clamped = max(ev.min_charging_current_a,
                   min(ev.max_charging_current_a, target_a))
+    # Truncate (not round) so we never overshoot available PV surplus.
+    # E.g. with 7.5 A of headroom, rounding up to 8 A would pull the last
+    # 0.5 A from the grid; truncating to 7 A keeps us on the export side.
     return ReactiveDecision(max_current_a=int(clamped))
 
 

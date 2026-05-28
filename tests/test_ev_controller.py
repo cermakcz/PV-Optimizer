@@ -12,8 +12,22 @@ from custom_components.pv_optimizer.ev_controller import (
 
 def test_classify_disconnected_default_substrings() -> None:
     assert classify_state("Disconnected") == EVStateClass.DISCONNECTED
-    assert classify_state("idle") == EVStateClass.DISCONNECTED
     assert classify_state("Unplugged") == EVStateClass.DISCONNECTED
+
+
+def test_classify_bare_idle_falls_back_to_idle() -> None:
+    """'idle' is intentionally not a DISCONNECTED token so 'charging_idle'
+    / 'connected_idle' aren't mis-routed. A bare 'idle' lands on the
+    conservative CONNECTED_IDLE fallback.
+    """
+    assert classify_state("idle") == EVStateClass.CONNECTED_IDLE
+
+
+def test_classify_connected_idle_compound_states() -> None:
+    """Firmwares that emit 'connected_idle' should classify as IDLE
+    (matches the 'connect' substring before the IDLE-fallback branch).
+    """
+    assert classify_state("connected_idle") == EVStateClass.CONNECTED_IDLE
 
 
 def test_classify_connected_requesting_default_substrings() -> None:
@@ -60,10 +74,10 @@ def test_classify_handles_none_and_unavailable() -> None:
 
 
 def test_classify_precedence_disconnected_wins_over_requesting() -> None:
-    """If a state somehow contains both 'idle' and 'charging' substrings,
-    'disconnected' classification takes precedence per §3.3."""
-    # Pathological example — pick disconnected on tie.
-    assert classify_state("idle charging") == EVStateClass.DISCONNECTED
+    """If a state somehow contains both a DISCONNECTED and a REQUESTING
+    substring, DISCONNECTED takes precedence per §3.3."""
+    # Pathological compound — pick disconnected on tie.
+    assert classify_state("unplugged charging") == EVStateClass.DISCONNECTED
 
 
 def test_classify_custom_vocab_override() -> None:
