@@ -119,6 +119,11 @@ class EVConfig:
     session_energy_entity: str | None = None
     start_switch_entity: str | None = None
     charger_mode_entity: str | None = None
+    # Option strings driven on charger_mode_entity. Vendor-specific:
+    # EVCS uses "Manual"/"Auto", Zappi uses "Eco+"/"Stopped", etc.
+    # "Active" = planner controls current; "Passive" = charger decides.
+    charger_mode_option_active: str = "Manual"
+    charger_mode_option_passive: str = "Auto"
     # Integration-created entity ids (the planner reads these to learn
     # the user's mode/target/deadline; HA layer owns their write side).
     mode_entity: str = ""        # select.pv_optimizer_ev_mode
@@ -820,21 +825,17 @@ class Planner:
         if es is not None:
             es.last_written_start = on
 
-    # Per-role option string. Currently hardcoded; if non-EVCS chargers
-    # need different vocab (e.g. Zappi "Eco+"/"Stopped") this should
-    # move into EVConfig.
-    _CHARGER_MODE_OPTIONS = {"active": "Manual", "passive": "Auto"}
-
     def _write_ev_charger_mode(self, role: str) -> None:
         """Set the charger's own auto/manual mode entity.
 
         ``role`` is the internal label ("active" / "passive") that we cache
-        idempotently; the option string sent to HA is looked up via
-        ``_CHARGER_MODE_OPTIONS``. When the mode actually changes we also
-        invalidate ``last_written_current_a`` because some charger firmwares
-        reset their internal current register on a mode transition, so the
-        next ``_write_ev_current`` must be allowed through even if the
-        target value is unchanged.
+        idempotently; the option string sent to HA comes from EVConfig
+        (vendor-specific: EVCS uses "Manual"/"Auto", Zappi different).
+        When the mode actually changes we also invalidate
+        ``last_written_current_a`` because some charger firmwares reset
+        their internal current register on a mode transition, so the next
+        ``_write_ev_current`` must be allowed through even if the target
+        value is unchanged.
         """
         cfg = self.config.ev
         if cfg is None or not cfg.charger_mode_entity:
@@ -842,9 +843,11 @@ class Planner:
         es = self.ev_state
         if es is not None and es.last_written_charger_mode == role:
             return
+        option = (cfg.charger_mode_option_active if role == "active"
+                  else cfg.charger_mode_option_passive)
         self.caller.call("select", "select_option", {
             "entity_id": cfg.charger_mode_entity,
-            "option": self._CHARGER_MODE_OPTIONS[role],
+            "option": option,
         })
         if es is not None:
             es.last_written_charger_mode = role

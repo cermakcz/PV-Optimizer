@@ -145,6 +145,16 @@ _EV_SCHEMA = vol.Schema({
     vol.Optional(C.CONF_EV_CHARGER_MODE): EntitySelector(
         EntitySelectorConfig(domain=["select", "input_select"])
     ),
+    # Vendor-specific option strings the planner drives on charger_mode_entity.
+    # Defaults match EVCS HACS; users with Zappi / Wallbox / etc. override these.
+    vol.Optional(C.CONF_EV_CHARGER_MODE_OPTION_ACTIVE,
+                 default=C.DEFAULT_EV_CHARGER_MODE_OPTION_ACTIVE): TextSelector(
+        TextSelectorConfig(),
+    ),
+    vol.Optional(C.CONF_EV_CHARGER_MODE_OPTION_PASSIVE,
+                 default=C.DEFAULT_EV_CHARGER_MODE_OPTION_PASSIVE): TextSelector(
+        TextSelectorConfig(),
+    ),
     vol.Optional(C.CONF_EV_MAX_CHARGING_POWER_KW): _num(0.0, 50.0, 0.1, "kW"),
     vol.Optional(C.CONF_EV_MAX_CHARGING_CURRENT_A): _num(0.0, 64.0, 1.0, "A"),
     vol.Optional(C.CONF_EV_MIN_CHARGING_CURRENT_A,

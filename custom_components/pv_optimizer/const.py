@@ -102,6 +102,13 @@ CONF_EV_SESSION_ENERGY = "ev_session_energy_entity"
 CONF_EV_MAX_CURRENT = "ev_max_current_entity"
 CONF_EV_START_SWITCH = "ev_start_switch_entity"
 CONF_EV_CHARGER_MODE = "ev_charger_mode_entity"
+# Per-charger option strings for the charger_mode select entity. Vocab
+# varies between vendors (EVCS uses "Manual"/"Auto", Zappi uses
+# "Eco+"/"Stopped", etc.), so the option text is configurable. "Active" =
+# planner-controls-current (manual-style), "Passive" = charger-decides
+# (auto-style).
+CONF_EV_CHARGER_MODE_OPTION_ACTIVE = "ev_charger_mode_option_active"
+CONF_EV_CHARGER_MODE_OPTION_PASSIVE = "ev_charger_mode_option_passive"
 
 CONF_EV_MAX_CHARGING_POWER_KW = "ev_max_charging_power_kw"
 CONF_EV_MAX_CHARGING_CURRENT_A = "ev_max_charging_current_a"
@@ -117,3 +124,7 @@ DEFAULT_EV_BUY_PRICE_THRESHOLD = 0.0
 DEFAULT_EV_CURRENT_TOLERANCE_A = 1.0
 DEFAULT_EV_SESSION_DONE_POWER_W = 100.0
 DEFAULT_EV_SESSION_DONE_SECONDS = 60.0
+# EVCS HACS uses "Manual"/"Auto"; users with other chargers override
+# these in the config flow.
+DEFAULT_EV_CHARGER_MODE_OPTION_ACTIVE = "Manual"
+DEFAULT_EV_CHARGER_MODE_OPTION_PASSIVE = "Auto"

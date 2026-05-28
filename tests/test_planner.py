@@ -1424,6 +1424,51 @@ def test_planner_reactive_mode_switch_writes_correct_option_strings() -> None:
     assert mode_writes[-1][2]["option"] == "Manual"
 
 
+def test_planner_reactive_mode_uses_custom_option_strings() -> None:
+    """Non-EVCS chargers (Zappi: 'Eco+'/'Stopped') must work — the option
+    text is sourced from EVConfig, not hardcoded.
+    """
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0,
+            buy_price_threshold=0.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        start_switch_entity="switch.ev_start",
+        charger_mode_entity="select.ev_mode",
+        charger_mode_option_active="Eco+",
+        charger_mode_option_passive="Stopped",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Connected")
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["switch.ev_start"] = StateView(state="off")
+    states["select.ev_mode"] = StateView(state="Stopped")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    # Passive branch — expensive price.
+    p.step(NOW)
+    mode_writes = [c for c in p.caller.calls
+                   if c[2].get("entity_id") == "select.ev_mode"]
+    assert mode_writes and mode_writes[-1][2]["option"] == "Stopped"
+    # Active branch — cheap price flips the latch.
+    states["sensor.buy"] = StateView(state="0.00",
+                                     attributes={"today": [0.0] * 24})
+    p.step(NOW + timedelta(seconds=300))
+    mode_writes = [c for c in p.caller.calls
+                   if c[2].get("entity_id") == "select.ev_mode"]
+    assert mode_writes[-1][2]["option"] == "Eco+"
+
+
 def test_planner_reactive_mode_transition_re_asserts_current() -> None:
     """On a passive→active mode flip the planner must re-assert max-current
     even if the target value is unchanged: some charger firmwares reset the

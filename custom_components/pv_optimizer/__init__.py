@@ -81,6 +81,12 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
             session_energy_entity=data.get(C.CONF_EV_SESSION_ENERGY),
             start_switch_entity=data.get(C.CONF_EV_START_SWITCH),
             charger_mode_entity=data.get(C.CONF_EV_CHARGER_MODE),
+            charger_mode_option_active=str(data.get(
+                C.CONF_EV_CHARGER_MODE_OPTION_ACTIVE,
+                C.DEFAULT_EV_CHARGER_MODE_OPTION_ACTIVE)),
+            charger_mode_option_passive=str(data.get(
+                C.CONF_EV_CHARGER_MODE_OPTION_PASSIVE,
+                C.DEFAULT_EV_CHARGER_MODE_OPTION_PASSIVE)),
             mode_entity="select.pv_optimizer_ev_mode",
             target_kwh_entity="number.pv_optimizer_ev_target_kwh",
             target_pct_entity="number.pv_optimizer_ev_target_pct",
