@@ -130,6 +130,37 @@ _LOAD_FORECAST_SCHEMA = vol.Schema({
 })
 
 
+# All EV fields are optional. Leaving every input/output entity blank
+# disables the EV feature entirely.
+_EV_SCHEMA = vol.Schema({
+    vol.Optional(C.CONF_EV_CHARGER_STATE): _sensor(),
+    vol.Optional(C.CONF_EV_CHARGING_POWER): _sensor(),
+    vol.Optional(C.CONF_EV_SESSION_ENERGY): _sensor(),
+    vol.Optional(C.CONF_EV_MAX_CURRENT): EntitySelector(
+        EntitySelectorConfig(domain=["number", "input_number"])
+    ),
+    vol.Optional(C.CONF_EV_START_SWITCH): EntitySelector(
+        EntitySelectorConfig(domain=["switch", "input_boolean"])
+    ),
+    vol.Optional(C.CONF_EV_CHARGER_MODE): EntitySelector(
+        EntitySelectorConfig(domain=["select", "input_select"])
+    ),
+    vol.Optional(C.CONF_EV_MAX_CHARGING_POWER_KW): _num(0.0, 50.0, 0.1, "kW"),
+    vol.Optional(C.CONF_EV_MAX_CHARGING_CURRENT_A): _num(0.0, 64.0, 1.0, "A"),
+    vol.Optional(C.CONF_EV_MIN_CHARGING_CURRENT_A,
+                 default=C.DEFAULT_EV_MIN_CHARGING_CURRENT_A): _num(0.0, 32.0, 1.0, "A"),
+    vol.Optional(C.CONF_EV_BUY_PRICE_THRESHOLD,
+                 default=C.DEFAULT_EV_BUY_PRICE_THRESHOLD): _num(-10.0, 10.0, 0.01, "/kWh"),
+    vol.Optional(C.CONF_EV_CAR_BATTERY_KWH): _num(0.0, 200.0, 0.5, "kWh"),
+    vol.Optional(C.CONF_EV_CURRENT_TOLERANCE_A,
+                 default=C.DEFAULT_EV_CURRENT_TOLERANCE_A): _num(0.0, 5.0, 1.0, "A"),
+    vol.Optional(C.CONF_EV_SESSION_DONE_POWER_W,
+                 default=C.DEFAULT_EV_SESSION_DONE_POWER_W): _num(0.0, 1000.0, 10.0, "W"),
+    vol.Optional(C.CONF_EV_SESSION_DONE_SECONDS,
+                 default=C.DEFAULT_EV_SESSION_DONE_SECONDS): _num(0.0, 600.0, 5.0, "s"),
+})
+
+
 class PvOptimizerConfigFlow(config_entries.ConfigFlow, domain=_DOMAIN):
     """Multi-step setup flow."""
 
@@ -159,10 +190,16 @@ class PvOptimizerConfigFlow(config_entries.ConfigFlow, domain=_DOMAIN):
     async def async_step_load_forecast(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
             self._data.update(user_input)
-            return self.async_create_entry(title="PV LP Optimizer", data=self._data)
+            return await self.async_step_ev()
         return self.async_show_form(
             step_id="load_forecast", data_schema=_LOAD_FORECAST_SCHEMA,
         )
+
+    async def async_step_ev(self, user_input: dict[str, Any] | None = None):
+        if user_input is not None:
+            self._data.update(user_input)
+            return self.async_create_entry(title="PV LP Optimizer", data=self._data)
+        return self.async_show_form(step_id="ev", data_schema=_EV_SCHEMA)
 
     @staticmethod
     def async_get_options_flow(config_entry):
@@ -177,7 +214,7 @@ class PvOptimizerConfigFlow(config_entries.ConfigFlow, domain=_DOMAIN):
 # update listener that reloads the entry when options change.
 _OPTIONS_SCHEMA = _ENTITIES_SCHEMA.extend(_BATTERY_SCHEMA.schema).extend(
     _SOLVER_SCHEMA.schema
-).extend(_LOAD_FORECAST_SCHEMA.schema)
+).extend(_LOAD_FORECAST_SCHEMA.schema).extend(_EV_SCHEMA.schema)
 
 
 def _schema_with_suggestions(schema: vol.Schema, current: dict[str, Any]) -> vol.Schema:
