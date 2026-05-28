@@ -280,3 +280,50 @@ def test_ultimate_override_releases_after_dwell_out_of_requesting() -> None:
         ev=ev,
     )
     assert not s.ultimate_override
+
+
+# ---------------------------------------------------------------------------
+# Task 8: is_session_done
+# ---------------------------------------------------------------------------
+
+from custom_components.pv_optimizer.ev_controller import is_session_done
+
+
+def test_session_done_when_disconnected() -> None:
+    ev = _ev()
+    assert is_session_done(
+        state_class=EVStateClass.DISCONNECTED,
+        ev_charging_power_w=0.0, low_power_seconds=0.0, ev=ev,
+    )
+
+
+def test_session_done_when_idle_and_low_power_long_enough() -> None:
+    ev = _ev()
+    assert is_session_done(
+        state_class=EVStateClass.CONNECTED_IDLE,
+        ev_charging_power_w=50.0, low_power_seconds=120.0, ev=ev,
+    )
+
+
+def test_session_not_done_when_idle_but_brief() -> None:
+    ev = _ev()
+    assert not is_session_done(
+        state_class=EVStateClass.CONNECTED_IDLE,
+        ev_charging_power_w=50.0, low_power_seconds=30.0, ev=ev,
+    )
+
+
+def test_session_not_done_when_idle_but_drawing_power() -> None:
+    ev = _ev()
+    assert not is_session_done(
+        state_class=EVStateClass.CONNECTED_IDLE,
+        ev_charging_power_w=2000.0, low_power_seconds=600.0, ev=ev,
+    )
+
+
+def test_session_not_done_when_still_requesting() -> None:
+    ev = _ev()
+    assert not is_session_done(
+        state_class=EVStateClass.CONNECTED_REQUESTING,
+        ev_charging_power_w=0.0, low_power_seconds=600.0, ev=ev,
+    )

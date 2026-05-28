@@ -154,3 +154,26 @@ def update_latches(
         ultimate_override = False
 
     return LatchState(cheap_grid=cheap_grid, ultimate_override=ultimate_override)
+
+
+def is_session_done(
+    *,
+    state_class: EVStateClass,
+    ev_charging_power_w: float,
+    low_power_seconds: float,
+    ev,
+) -> bool:
+    """Return True per §6.1 session-done definition.
+
+    Done iff:
+        - disconnected; OR
+        - connected_idle AND ev_power < session_done_power_w for
+          ≥ session_done_seconds (caller tracks the duration).
+    """
+    if state_class == EVStateClass.DISCONNECTED:
+        return True
+    if (state_class == EVStateClass.CONNECTED_IDLE
+            and ev_charging_power_w < ev.session_done_power_w
+            and low_power_seconds >= ev.session_done_seconds):
+        return True
+    return False
