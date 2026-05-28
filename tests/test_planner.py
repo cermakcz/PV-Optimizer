@@ -1135,3 +1135,64 @@ def test_physical_soc_projection_stays_flat_under_force_hold_import() -> None:
     # Projection stays flat across the whole horizon (no physical drain).
     for s in slots:
         assert s.soc_physical_kwh == pytest.approx(5.0, abs=1e-3)
+
+
+def test_planner_manual_mode_writes_max() -> None:
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        start_switch_entity="switch.ev_start",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Connected")  # idle
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["switch.ev_start"] = StateView(state="off")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="manual")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    p.step(NOW)
+    writes = [c for c in p.caller.calls
+              if c[2].get("entity_id") == "number.ev_max_current"]
+    assert writes, "manual mode should write max-current"
+    assert writes[-1][2]["value"] == 20
+    starts = [c for c in p.caller.calls
+              if c[2].get("entity_id") == "switch.ev_start"]
+    assert starts and starts[-1][1] == "turn_on"
+
+
+def test_planner_manual_mode_auto_returns_on_disconnect() -> None:
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Disconnected")
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="manual")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    p.step(NOW)
+    mode_writes = [c for c in p.caller.calls
+                   if c[2].get("entity_id") == "select.pv_optimizer_ev_mode"]
+    assert mode_writes, "manual mode should auto-return on disconnect"
+    assert mode_writes[-1][2]["option"] == "auto"
