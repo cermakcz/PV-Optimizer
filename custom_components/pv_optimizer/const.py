@@ -87,3 +87,26 @@ DEFAULT_LOAD_FORECAST_LOOKBACK_DAYS = 7
 DEFAULT_LOAD_FORECAST_CAP_KW = 0.0   # 0 = no cap
 DEFAULT_LOAD_FORECAST_WEEKDAY_AWARE = False
 DEFAULT_CURRENCY = "EUR"
+
+# --- EV charging (all optional; leaving blank disables the feature) ---
+CONF_EV_CHARGER_STATE = "ev_charger_state_entity"
+CONF_EV_CHARGING_POWER = "ev_charging_power_entity"
+CONF_EV_SESSION_ENERGY = "ev_session_energy_entity"
+CONF_EV_MAX_CURRENT = "ev_max_current_entity"
+CONF_EV_START_SWITCH = "ev_start_switch_entity"
+CONF_EV_CHARGER_MODE = "ev_charger_mode_entity"
+
+CONF_EV_MAX_CHARGING_POWER_KW = "ev_max_charging_power_kw"
+CONF_EV_MAX_CHARGING_CURRENT_A = "ev_max_charging_current_a"
+CONF_EV_MIN_CHARGING_CURRENT_A = "ev_min_charging_current_a"
+CONF_EV_BUY_PRICE_THRESHOLD = "ev_buy_price_threshold"
+CONF_EV_CAR_BATTERY_KWH = "ev_car_battery_kwh"
+CONF_EV_CURRENT_TOLERANCE_A = "ev_current_tolerance_a"
+CONF_EV_SESSION_DONE_POWER_W = "ev_session_done_power_w"
+CONF_EV_SESSION_DONE_SECONDS = "ev_session_done_seconds"
+
+DEFAULT_EV_MIN_CHARGING_CURRENT_A = 6.0
+DEFAULT_EV_BUY_PRICE_THRESHOLD = 0.0
+DEFAULT_EV_CURRENT_TOLERANCE_A = 1.0
+DEFAULT_EV_SESSION_DONE_POWER_W = 100.0
+DEFAULT_EV_SESSION_DONE_SECONDS = 60.0
