@@ -391,7 +391,7 @@ class Planner:
                 classify_state(self._read_text(cfg.ev.charger_state_entity))
                 != EVStateClass.DISCONNECTED
             )
-            session_done = self._session_energy_kwh(cfg.ev, now)
+            session_done = self.session_energy_kwh()
             remaining = max(0.0, target_kwh - session_done)
             self._cached_ev_remaining_kwh = remaining
             if (connected and remaining > 0 and deadline is not None
@@ -565,9 +565,19 @@ class Planner:
             return None
         return dt
 
-    def _session_energy_kwh(self, ev_cfg: EVConfig, now: datetime) -> float:
-        # Prefer the user-configured session-energy sensor; else use the
-        # internal integrator (Task 14).
+    def session_energy_kwh(self) -> float:
+        """Current EV session energy in kWh.
+
+        Prefers the user-configured session-energy sensor; falls back to
+        the internal integrator (Task 14). Returns 0.0 when no EV is
+        configured. Public so the sensor platform reads from the same
+        source as the LP — otherwise the sensor would show the never-
+        updated integrator field while the LP correctly tracks the
+        external entity.
+        """
+        ev_cfg = self.config.ev
+        if ev_cfg is None:
+            return 0.0
         if ev_cfg.session_energy_entity:
             return self._read_float_optional(
                 ev_cfg.session_energy_entity, default=0.0)

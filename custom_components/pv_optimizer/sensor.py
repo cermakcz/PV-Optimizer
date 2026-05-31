@@ -229,8 +229,14 @@ class _EVSessionEnergySensor(_Base):
 
     @property
     def native_value(self) -> float | None:
-        es = getattr(self.coordinator._planner, "ev_state", None)
-        return None if es is None else round(es.session_energy_kwh, 3)
+        # Route through the planner so the sensor agrees with the LP: when
+        # the user has bound ``ev_session_energy_entity`` the integrator is
+        # deliberately skipped (to avoid double-counting) and ``ev_state``'s
+        # local integrator field stays at 0.
+        planner = self.coordinator._planner
+        if planner is None or self.coordinator.config.ev is None:
+            return None
+        return round(planner.session_energy_kwh(), 3)
 
 
 class _EVRemainingSensor(_Base):

@@ -1391,6 +1391,45 @@ def test_planner_integrates_session_energy_when_no_sensor() -> None:
     assert p.ev_state.session_energy_kwh == pytest.approx(1.0, abs=1e-3)
 
 
+def test_session_energy_kwh_reads_external_entity_when_configured() -> None:
+    """Regression guard: when the user binds ev_session_energy_entity the
+    public ``session_energy_kwh()`` must read from it, not from the
+    internal integrator field (which is correctly skipped to avoid
+    double-counting and therefore stays at 0). The sensor platform
+    routes through this method, so a wrong source here surfaces as a
+    permanently-zero ``sensor.pv_optimizer_ev_session_energy``.
+    """
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        session_energy_entity="sensor.ev_session_energy",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Charging")
+    states["sensor.ev_power"] = StateView(state="2000")
+    states["sensor.ev_session_energy"] = StateView(state="3.7")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    # Internal integrator must NOT run (external entity is configured).
+    p.step(NOW)
+    p.step(NOW + timedelta(minutes=30))
+    assert p.ev_state is not None
+    assert p.ev_state.session_energy_kwh == pytest.approx(0.0, abs=1e-9)
+    # But the public accessor returns the external entity's value.
+    assert p.session_energy_kwh() == pytest.approx(3.7, abs=1e-6)
+
+
 def test_planner_resets_session_energy_on_plug_in() -> None:
     from custom_components.pv_optimizer.planner import EVConfig
     from custom_components.pv_optimizer.models import EVParams
