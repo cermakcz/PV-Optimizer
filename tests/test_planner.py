@@ -1252,6 +1252,139 @@ def test_planner_engages_lp_when_target_and_deadline_set() -> None:
     assert writes and writes[-1][2]["value"] >= 6
 
 
+def test_planner_planned_start_in_future_suppresses_ev_in_auto() -> None:
+    """When ``planned_start`` is in the future, the planner treats a
+    physically connected car as disconnected: no LP charging, no reactive
+    cheap-grid latch, no current/mode/start writes. This lets the user say
+    "don't touch the car until 5pm" even when it's plugged in earlier.
+    """
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        start_switch_entity="switch.ev_start",
+        charger_mode_entity="select.ev_mode",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+        planned_start_entity="datetime.pv_optimizer_ev_planned_start",
+    )
+    # Cheap slot 0 (0.05), expensive others (0.30) — without the gate the
+    # LP would happily plan EV charging in slot 0.
+    states = _states(buy=[0.05] + [0.30] * 23)
+    states["sensor.ev_state"] = StateView(state="Connected")
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["switch.ev_start"] = StateView(state="off")
+    states["select.ev_mode"] = StateView(state="Auto")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="5")
+    deadline = (NOW + timedelta(hours=10)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_deadline"] = StateView(state=deadline)
+    planned_start = (NOW + timedelta(hours=5)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_planned_start"] = StateView(
+        state=planned_start)
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    cycle = p.step(NOW)
+    assert cycle.result is not None
+    # LP must not schedule EV charging at all — car is "absent".
+    assert all(s.p_ev_chg_kw == 0 for s in cycle.result.slots)
+    # No EV-side writes happened.
+    ev_writes = [c for c in p.caller.calls if c[2].get("entity_id") in (
+        "number.ev_max_current", "switch.ev_start", "select.ev_mode")]
+    assert ev_writes == []
+
+
+def test_planner_planned_start_in_past_does_not_gate() -> None:
+    """A ``planned_start`` whose time has already rolled past must behave
+    exactly as if it were unset — otherwise the gate would silently strand
+    the schedule after the user's planned arrival.
+    """
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+        planned_start_entity="datetime.pv_optimizer_ev_planned_start",
+    )
+    states = _states(buy=[0.05] + [0.30] * 23)
+    states["sensor.ev_state"] = StateView(state="Connected")
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="5")
+    deadline = (NOW + timedelta(hours=3)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_deadline"] = StateView(state=deadline)
+    planned_start = (NOW - timedelta(hours=1)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_planned_start"] = StateView(
+        state=planned_start)
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    cycle = p.step(NOW)
+    assert cycle.result is not None
+    assert cycle.result.slots[0].p_ev_chg_kw > 0
+    writes = [c for c in p.caller.calls
+              if c[2].get("entity_id") == "number.ev_max_current"]
+    assert writes and writes[-1][2]["value"] >= 6
+
+
+def test_planner_planned_start_does_not_gate_manual_mode() -> None:
+    """Manual mode is the user explicitly demanding "charge now" — the
+    schedule must not silently block them. The LP still ignores the car
+    (because LP-side gating is shared with auto), but ``_apply_ev`` still
+    writes the manual mode/current/start to the EVCS.
+    """
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        start_switch_entity="switch.ev_start",
+        charger_mode_entity="select.ev_mode",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+        planned_start_entity="datetime.pv_optimizer_ev_planned_start",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Connected")
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["switch.ev_start"] = StateView(state="off")
+    states["select.ev_mode"] = StateView(state="Auto")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="manual")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    planned_start = (NOW + timedelta(hours=5)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_planned_start"] = StateView(
+        state=planned_start)
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    p.step(NOW)
+    starts = [c for c in p.caller.calls
+              if c[2].get("entity_id") == "switch.ev_start"]
+    mode_writes = [c for c in p.caller.calls
+                   if c[2].get("entity_id") == "select.ev_mode"]
+    current_writes = [c for c in p.caller.calls
+                      if c[2].get("entity_id") == "number.ev_max_current"]
+    assert starts and starts[-1][1] == "turn_on"
+    assert mode_writes and mode_writes[-1][2]["option"] == "Manual"
+    assert current_writes and current_writes[-1][2]["value"] >= 6
+
+
 def test_planner_manual_mode_auto_returns_on_disconnect() -> None:
     from custom_components.pv_optimizer.planner import EVConfig
     from custom_components.pv_optimizer.models import EVParams

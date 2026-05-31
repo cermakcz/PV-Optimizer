@@ -127,10 +127,11 @@ class EVConfig:
     charger_mode_option_passive: str = "Auto"
     # Integration-created entity ids (the planner reads these to learn
     # the user's mode/target/deadline; HA layer owns their write side).
-    mode_entity: str = ""        # select.pv_optimizer_ev_mode
-    target_kwh_entity: str = ""  # number.pv_optimizer_ev_target_kwh
-    target_pct_entity: str = ""  # number.pv_optimizer_ev_target_pct
-    deadline_entity: str = ""    # datetime.pv_optimizer_ev_deadline
+    mode_entity: str = ""           # select.pv_optimizer_ev_mode
+    target_kwh_entity: str = ""     # number.pv_optimizer_ev_target_kwh
+    target_pct_entity: str = ""     # number.pv_optimizer_ev_target_pct
+    deadline_entity: str = ""       # datetime.pv_optimizer_ev_deadline
+    planned_start_entity: str = ""  # datetime.pv_optimizer_ev_planned_start
 
 
 @dataclass(frozen=True)
@@ -387,10 +388,19 @@ class Planner:
                 )
             deadline = self._read_datetime_optional(
                 cfg.ev.deadline_entity)
-            connected = (
-                classify_state(self._read_text(cfg.ev.charger_state_entity))
-                != EVStateClass.DISCONNECTED
-            )
+            # ``planned_start`` (if set and in the future) is the
+            # authoritative gate: the planner pretends the car isn't there
+            # until the scheduled start, so a still-physically-plugged car
+            # doesn't trigger LP planning or reactive charging early.
+            planned_start = self._read_datetime_optional(
+                cfg.ev.planned_start_entity)
+            if planned_start is not None and planned_start > now:
+                connected = False
+            else:
+                connected = (
+                    classify_state(self._read_text(cfg.ev.charger_state_entity))
+                    != EVStateClass.DISCONNECTED
+                )
             session_done = self.session_energy_kwh()
             remaining = max(0.0, target_kwh - session_done)
             self._cached_ev_remaining_kwh = remaining
@@ -664,6 +674,15 @@ class Planner:
         if cfg is None or self.ev_state is None:
             return
         mode = self._read_mode()  # "auto" / "manual" / "off"
+        # Future-planned-start gate: in auto mode, suppress all EV writes
+        # (LP plan, reactive cheap-grid latch, mode/current/start) until
+        # the scheduled start time rolls past. Manual mode explicitly
+        # overrides — user intent beats schedule.
+        if mode == "auto":
+            planned_start = self._read_datetime_optional(
+                cfg.planned_start_entity)
+            if planned_start is not None and planned_start > now:
+                return
         if mode == "off":
             return
         # Read inputs.

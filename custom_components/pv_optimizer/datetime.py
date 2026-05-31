@@ -17,15 +17,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
     coord = hass.data[DOMAIN][entry.entry_id]
     if coord.config.ev is None:
         return
-    async_add_entities([_DeadlineDateTime(entry.entry_id)])
+    async_add_entities([
+        _DeadlineDateTime(entry.entry_id),
+        _PlannedStartDateTime(entry.entry_id),
+    ])
 
 
-class _DeadlineDateTime(RestoreEntity, DateTimeEntity):
-    def __init__(self, entry_id: str) -> None:
-        self._attr_unique_id = f"{entry_id}_ev_deadline"
-        self._attr_name = "PV LP Optimizer EV Deadline"
-        # Pin entity_id to match what the planner reads.
-        self.entity_id = "datetime.pv_optimizer_ev_deadline"
+class _RestoredDateTime(RestoreEntity, DateTimeEntity):
+    def __init__(self, entry_id: str, key: str, name: str) -> None:
+        self._attr_unique_id = f"{entry_id}_{key}"
+        self._attr_name = name
+        self.entity_id = f"datetime.pv_optimizer_{key}"
         self._value: datetime | None = None
 
     @property
@@ -44,3 +46,15 @@ class _DeadlineDateTime(RestoreEntity, DateTimeEntity):
                 self._value = datetime.fromisoformat(last.state)
             except ValueError:
                 self._value = None
+
+
+class _DeadlineDateTime(_RestoredDateTime):
+    def __init__(self, entry_id: str) -> None:
+        super().__init__(entry_id, "ev_deadline", "PV LP Optimizer EV Deadline")
+
+
+class _PlannedStartDateTime(_RestoredDateTime):
+    def __init__(self, entry_id: str) -> None:
+        super().__init__(
+            entry_id, "ev_planned_start",
+            "PV LP Optimizer EV Planned Start")

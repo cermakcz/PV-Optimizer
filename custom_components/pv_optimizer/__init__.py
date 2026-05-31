@@ -91,6 +91,7 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
             target_kwh_entity="number.pv_optimizer_ev_target_kwh",
             target_pct_entity="number.pv_optimizer_ev_target_pct",
             deadline_entity="datetime.pv_optimizer_ev_deadline",
+            planned_start_entity="datetime.pv_optimizer_ev_planned_start",
         )
     config = PlannerConfig(
         load_power_entity=data[C.CONF_LOAD_POWER],
