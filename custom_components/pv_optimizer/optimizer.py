@@ -88,15 +88,18 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
     soc_end = pulp.LpVariable("soc_end", lowBound=bat.soc_min_kwh, upBound=bat.soc_max_kwh)
 
     # EV charging variables. Created only when an EV target is set; the
-    # upper bound is the charger's max power for slots before the deadline,
-    # 0 elsewhere — outright disables the variable for out-of-window slots.
+    # upper bound is the charger's max power for slots inside the
+    # ``[start_index, deadline_index)`` window, 0 elsewhere — outright
+    # disables the variable for out-of-window slots. ``start_index`` lets
+    # the planner pre-schedule a future-start charging block (user sets a
+    # planned arrival time and the LP reserves slots from that time on).
     ev_active = inputs.ev is not None and inputs.ev_target_kwh > 0
     p_ev: list = []
     if ev_active:
         for t in range(n):
             ub = (inputs.ev.max_charging_power_kw
-                  if inputs.ev_deadline_index is not None
-                     and t < inputs.ev_deadline_index
+                  if (inputs.ev_deadline_index is not None
+                      and inputs.ev_start_index <= t < inputs.ev_deadline_index)
                   else 0.0)
             p_ev.append(pulp.LpVariable(f"ev_{t}", lowBound=0, upBound=ub))
     else:

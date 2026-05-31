@@ -78,7 +78,8 @@ class OptimizerInputs:
     # builds (regression no-op).
     ev: "EVParams | None" = None
     ev_target_kwh: float = 0.0
-    ev_deadline_index: int | None = None  # exclusive; charging allowed in slots [0, deadline_index)
+    ev_deadline_index: int | None = None  # exclusive; charging allowed in slots [start_index, deadline_index)
+    ev_start_index: int = 0  # inclusive; first slot in which EV charging is permitted
 
     def __post_init__(self) -> None:
         n = len(self.slots)
@@ -108,6 +109,14 @@ class OptimizerInputs:
                 0 <= self.ev_deadline_index <= n):
             raise ValueError(
                 f"ev_deadline_index must be in [0, {n}], got {self.ev_deadline_index}")
+        if not (0 <= self.ev_start_index <= n):
+            raise ValueError(
+                f"ev_start_index must be in [0, {n}], got {self.ev_start_index}")
+        if (self.ev_deadline_index is not None
+                and self.ev_start_index > self.ev_deadline_index):
+            raise ValueError(
+                f"ev_start_index ({self.ev_start_index}) must be <= "
+                f"ev_deadline_index ({self.ev_deadline_index})")
 
 
 @dataclass(frozen=True)

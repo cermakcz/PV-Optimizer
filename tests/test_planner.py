@@ -1252,11 +1252,11 @@ def test_planner_engages_lp_when_target_and_deadline_set() -> None:
     assert writes and writes[-1][2]["value"] >= 6
 
 
-def test_planner_planned_start_in_future_suppresses_ev_in_auto() -> None:
-    """When ``planned_start`` is in the future, the planner treats a
-    physically connected car as disconnected: no LP charging, no reactive
-    cheap-grid latch, no current/mode/start writes. This lets the user say
-    "don't touch the car until 5pm" even when it's plugged in earlier.
+def test_planner_planned_start_pre_schedules_window_in_auto() -> None:
+    """When ``planned_start`` is in the future, the LP reserves a charging
+    window from that slot onward (even with the car currently disconnected),
+    but ``_apply_ev`` writes nothing to the EVCS until the time rolls in.
+    Dashboard sees the planned block; hardware doesn't.
     """
     from custom_components.pv_optimizer.planner import EVConfig
     from custom_components.pv_optimizer.models import EVParams
@@ -1274,27 +1274,35 @@ def test_planner_planned_start_in_future_suppresses_ev_in_auto() -> None:
         deadline_entity="datetime.pv_optimizer_ev_deadline",
         planned_start_entity="datetime.pv_optimizer_ev_planned_start",
     )
-    # Cheap slot 0 (0.05), expensive others (0.30) — without the gate the
-    # LP would happily plan EV charging in slot 0.
-    states = _states(buy=[0.05] + [0.30] * 23)
-    states["sensor.ev_state"] = StateView(state="Connected")
+    # Slot 0 is cheapest but must NOT be used (before planned_start).
+    # planned_start at +2h => slot index 2 (slot_minutes=60, NOW=noon).
+    # The LP should pick slot 2 (next cheapest in-window) over later
+    # expensive slots.
+    buy = [0.05] * 24
+    buy[2] = 0.06  # only-slightly-more-expensive in-window
+    buy[3] = 0.30  # discourage spill
+    states = _states(buy=buy)
+    states["sensor.ev_state"] = StateView(state="Disconnected")
     states["sensor.ev_power"] = StateView(state="0")
     states["number.ev_max_current"] = StateView(state="0")
     states["switch.ev_start"] = StateView(state="off")
     states["select.ev_mode"] = StateView(state="Auto")
     states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
     states["number.pv_optimizer_ev_target_kwh"] = StateView(state="5")
-    deadline = (NOW + timedelta(hours=10)).isoformat() + "+00:00"
+    deadline = (NOW + timedelta(hours=4)).isoformat() + "+00:00"
     states["datetime.pv_optimizer_ev_deadline"] = StateView(state=deadline)
-    planned_start = (NOW + timedelta(hours=5)).isoformat() + "+00:00"
+    planned_start = (NOW + timedelta(hours=2)).isoformat() + "+00:00"
     states["datetime.pv_optimizer_ev_planned_start"] = StateView(
         state=planned_start)
     p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
     cycle = p.step(NOW)
     assert cycle.result is not None
-    # LP must not schedule EV charging at all — car is "absent".
-    assert all(s.p_ev_chg_kw == 0 for s in cycle.result.slots)
-    # No EV-side writes happened.
+    # Slots before planned_start: no EV.
+    assert cycle.result.slots[0].p_ev_chg_kw == 0
+    assert cycle.result.slots[1].p_ev_chg_kw == 0
+    # At or after planned_start: LP plans charging.
+    assert cycle.result.slots[2].p_ev_chg_kw > 0
+    # Hardware untouched while the gate is active.
     ev_writes = [c for c in p.caller.calls if c[2].get("entity_id") in (
         "number.ev_max_current", "switch.ev_start", "select.ev_mode")]
     assert ev_writes == []

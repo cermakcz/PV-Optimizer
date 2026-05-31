@@ -372,6 +372,7 @@ class Planner:
         ev_params = None
         ev_target = 0.0
         ev_deadline_idx = None
+        ev_start_idx = 0
         if cfg.ev is not None:
             target_kwh = self._read_float_optional(
                 cfg.ev.target_kwh_entity, default=0.0)
@@ -388,14 +389,16 @@ class Planner:
                 )
             deadline = self._read_datetime_optional(
                 cfg.ev.deadline_entity)
-            # ``planned_start`` (if set and in the future) is the
-            # authoritative gate: the planner pretends the car isn't there
-            # until the scheduled start, so a still-physically-plugged car
-            # doesn't trigger LP planning or reactive charging early.
+            # ``planned_start`` (when set and in the future) means: pretend
+            # the car will be plugged in by then, regardless of current
+            # physical state, and reserve the LP window from that slot on.
+            # This lets the user pre-schedule a charging block before
+            # arriving home. ``_apply_ev`` keeps a parallel gate so the
+            # EVCS isn't physically poked until the time rolls in.
             planned_start = self._read_datetime_optional(
                 cfg.ev.planned_start_entity)
             if planned_start is not None and planned_start > now:
-                connected = False
+                connected = True
             else:
                 connected = (
                     classify_state(self._read_text(cfg.ev.charger_state_entity))
@@ -416,7 +419,13 @@ class Planner:
                         (i for i, s in enumerate(slot_starts) if s >= deadline_floor),
                         len(slot_starts),
                     )
-                if ev_deadline_idx > 0:
+                if planned_start is not None and planned_start > now:
+                    start_floor = _floor_to_slot(planned_start, cfg.slot_minutes)
+                    ev_start_idx = next(
+                        (i for i, s in enumerate(slot_starts) if s >= start_floor),
+                        len(slot_starts),
+                    )
+                if ev_start_idx < ev_deadline_idx:
                     ev_params = cfg.ev.params
                     ev_target = remaining
 
@@ -428,6 +437,7 @@ class Planner:
             ev=ev_params,
             ev_target_kwh=ev_target,
             ev_deadline_index=ev_deadline_idx,
+            ev_start_index=ev_start_idx,
         )
 
     # ---- price source readers -------------------------------------------
