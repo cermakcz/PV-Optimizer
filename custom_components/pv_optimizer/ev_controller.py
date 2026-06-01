@@ -102,9 +102,6 @@ def decide_reactive(
     """
     if state_class == EVStateClass.DISCONNECTED:
         return ReactiveDecision(max_current_a=0)
-    if state_class == EVStateClass.CONNECTED_REQUESTING:
-        # Ultimate override — car has actively negotiated for power (§4.3).
-        return ReactiveDecision(max_current_a=int(round(ev.max_charging_current_a)))
     if price_buy <= ev.buy_price_threshold:
         return ReactiveDecision(max_current_a=int(round(ev.max_charging_current_a)))
     # Surplus tracking: back-add what EV is already drawing so loop converges.

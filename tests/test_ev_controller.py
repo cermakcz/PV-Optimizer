@@ -123,13 +123,41 @@ def test_reactive_disconnected_writes_zero() -> None:
     assert out.max_current_a == 0
 
 
-def test_reactive_connected_requesting_grants_max() -> None:
-    """Ultimate override — car requesting beats every other rule."""
+def test_reactive_requesting_no_surplus_no_cheap_grid_writes_zero() -> None:
+    """REQUESTING is not a short-circuit: with no surplus and an
+    above-threshold price, the function returns 0 even while the car
+    is asking — auto mode honours the LP / surplus constraint rather
+    than the car's request."""
     out = decide_reactive(
         state_class=EVStateClass.CONNECTED_REQUESTING,
-        grid_power_w=5000.0,         # importing
+        grid_power_w=5000.0,         # importing — no surplus
         ev_charging_power_w=0.0,
         price_buy=0.50,              # not cheap
+        ev=_ev(),
+    )
+    assert out.max_current_a == 0
+
+
+def test_reactive_requesting_with_surplus_tracks_surplus() -> None:
+    """REQUESTING state falls through to surplus math — no short-circuit."""
+    out = decide_reactive(
+        state_class=EVStateClass.CONNECTED_REQUESTING,
+        grid_power_w=-3000.0,        # 3 kW surplus
+        ev_charging_power_w=0.0,
+        price_buy=0.50,
+        ev=_ev(),
+    )
+    # kw_per_amp = 0.4 -> 3 kW / 0.4 = 7.5 -> truncate to 7.
+    assert out.max_current_a == 7
+
+
+def test_reactive_requesting_with_cheap_grid_grants_max() -> None:
+    """Cheap-grid still wins for REQUESTING too — it's price-driven, not request-driven."""
+    out = decide_reactive(
+        state_class=EVStateClass.CONNECTED_REQUESTING,
+        grid_power_w=5000.0,
+        ev_charging_power_w=0.0,
+        price_buy=-0.05,             # below threshold
         ev=_ev(),
     )
     assert out.max_current_a == 20
