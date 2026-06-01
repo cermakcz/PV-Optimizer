@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "pv_optimizer"
-PLATFORMS = ["sensor", "number", "select", "datetime"]
+PLATFORMS = ["sensor", "number", "select", "datetime", "switch"]
 
 # HA surfaces a missing / pending / failed entity state as None / "" /
 # "unknown" / "unavailable". All readers in this integration treat these

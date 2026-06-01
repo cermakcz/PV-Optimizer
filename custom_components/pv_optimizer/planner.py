@@ -132,6 +132,11 @@ class EVConfig:
     target_pct_entity: str = ""     # number.pv_optimizer_ev_target_pct
     deadline_entity: str = ""       # datetime.pv_optimizer_ev_deadline
     planned_start_entity: str = ""  # datetime.pv_optimizer_ev_planned_start
+    # Opt-in switch: when ON, 'car' mode auto-returns to 'auto' on
+    # session-done (disconnect, or idle+low-power dwell after the car
+    # has actually drawn power at least once). When OFF (default), 'car'
+    # mode is sticky — stays until the user switches it back.
+    car_auto_return_entity: str = ""
 
 
 @dataclass(frozen=True)

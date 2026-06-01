@@ -465,3 +465,40 @@ def test_translate_lp_positive_when_requesting_uses_lp_value() -> None:
         state_class=EVStateClass.CONNECTED_REQUESTING,
         ev=ev,
     ) == 10
+
+
+def test_car_auto_return_switch_class_shape() -> None:
+    """Smoke test: switch platform imports cleanly and defaults to off."""
+    import sys
+    from unittest.mock import MagicMock
+
+    # Stub out HA dependencies so the module can be imported without a full
+    # HA install in the test environment.  RestoreEntity and SwitchEntity must
+    # be distinct classes so Python doesn't reject the MRO.
+    class _FakeSwitchEntity: ...
+    class _FakeRestoreEntity: ...
+
+    _ha_stubs = {
+        "homeassistant": MagicMock(),
+        "homeassistant.components": MagicMock(),
+        "homeassistant.components.switch": MagicMock(SwitchEntity=_FakeSwitchEntity),
+        "homeassistant.config_entries": MagicMock(),
+        "homeassistant.core": MagicMock(),
+        "homeassistant.helpers": MagicMock(),
+        "homeassistant.helpers.entity_platform": MagicMock(),
+        "homeassistant.helpers.restore_state": MagicMock(RestoreEntity=_FakeRestoreEntity),
+    }
+    _inserted = {k for k in _ha_stubs if k not in sys.modules}
+    sys.modules.update(_ha_stubs)
+    # Remove any previously-cached version of the module under test.
+    sys.modules.pop("custom_components.pv_optimizer.switch", None)
+    try:
+        from custom_components.pv_optimizer.switch import _EVCarAutoReturnSwitch
+        s = _EVCarAutoReturnSwitch("entry-id-1")
+        assert s.entity_id == "switch.pv_optimizer_ev_car_auto_return"
+        assert s._attr_unique_id == "entry-id-1_ev_car_auto_return"
+        assert s.is_on is False
+    finally:
+        for k in _inserted:
+            sys.modules.pop(k, None)
+        sys.modules.pop("custom_components.pv_optimizer.switch", None)
