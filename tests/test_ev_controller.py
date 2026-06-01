@@ -359,6 +359,42 @@ def test_translate_lp_positive_when_requesting_uses_lp_value() -> None:
     ) == 10
 
 
+def test_select_migrates_manual_to_car() -> None:
+    import sys
+    from unittest.mock import MagicMock
+
+    # Stub out HA dependencies so the module can be imported without a full
+    # HA install in the test environment.  RestoreEntity and SelectEntity must
+    # be distinct classes so Python doesn't reject the MRO.
+    class _FakeSelectEntity: ...
+    class _FakeRestoreEntity: ...
+
+    _ha_stubs = {
+        "homeassistant": MagicMock(),
+        "homeassistant.components": MagicMock(),
+        "homeassistant.components.select": MagicMock(SelectEntity=_FakeSelectEntity),
+        "homeassistant.config_entries": MagicMock(),
+        "homeassistant.core": MagicMock(),
+        "homeassistant.helpers": MagicMock(),
+        "homeassistant.helpers.entity_platform": MagicMock(),
+        "homeassistant.helpers.restore_state": MagicMock(RestoreEntity=_FakeRestoreEntity),
+    }
+    _inserted = {k for k in _ha_stubs if k not in sys.modules}
+    sys.modules.update(_ha_stubs)
+    sys.modules.pop("custom_components.pv_optimizer.select", None)
+    try:
+        from custom_components.pv_optimizer.select import _migrate_legacy_mode
+        assert _migrate_legacy_mode("manual") == "car"
+        assert _migrate_legacy_mode("auto") == "auto"
+        assert _migrate_legacy_mode("car") == "car"
+        assert _migrate_legacy_mode("off") == "off"
+        assert _migrate_legacy_mode(None) is None
+    finally:
+        for k in _inserted:
+            sys.modules.pop(k, None)
+        sys.modules.pop("custom_components.pv_optimizer.select", None)
+
+
 def test_car_auto_return_switch_class_shape() -> None:
     """Smoke test: switch platform imports cleanly and defaults to off."""
     import sys

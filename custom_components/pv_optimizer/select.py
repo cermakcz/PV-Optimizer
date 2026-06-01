@@ -10,6 +10,18 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from .const import DOMAIN
 
 
+def _migrate_legacy_mode(stored: str | None) -> str | None:
+    """Map a restored mode value through legacy aliases.
+
+    Returns the stored string unchanged unless it's a legacy name; in
+    that case returns the current canonical name. Pure so callers can
+    test it without booting Home Assistant.
+    """
+    if stored == "manual":
+        return "car"
+    return stored
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
                             async_add_entities: AddEntitiesCallback) -> None:
     coord = hass.data[DOMAIN][entry.entry_id]
@@ -19,7 +31,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry,
 
 
 class _EVModeSelect(RestoreEntity, SelectEntity):
-    _attr_options = ["auto", "manual", "off"]
+    _attr_options = ["auto", "car", "off"]
     _attr_translation_key = "ev_mode"
 
     def __init__(self, entry_id: str) -> None:
@@ -42,5 +54,6 @@ class _EVModeSelect(RestoreEntity, SelectEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last and last.state in self._attr_options:
-            self._state = last.state
+        migrated = _migrate_legacy_mode(last.state if last else None)
+        if migrated in self._attr_options:
+            self._state = migrated
