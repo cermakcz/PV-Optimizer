@@ -59,6 +59,7 @@ class EVRuntimeState:
     # ``last_written_current_a`` because some charger firmwares reset their
     # internal current register on a mode flip.
     last_written_charger_mode: str | None = None  # "active" or "passive"
+    last_mode: str | None = None
     # Tracks whether the car has drawn meaningful power (>= session_done_power_w)
     # at any point during the current 'car' mode session (auto-return path only).
     # Without this, the auto-return would fire on the IDLE+low-power dwell
@@ -696,6 +697,7 @@ class Planner:
         if cfg is None or self.ev_state is None:
             return
         mode = self._read_mode()  # "auto" / "car" / "off"
+        self.ev_state.last_mode = mode
         # Future-planned-start gate: in auto mode, suppress all EV writes
         # (LP plan, reactive cheap-grid path, mode/current/start) until
         # the scheduled start time rolls past. Car mode explicitly

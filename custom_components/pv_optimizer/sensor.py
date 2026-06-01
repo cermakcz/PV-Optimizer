@@ -209,6 +209,13 @@ class _EVStatusSensor(_Base):
         from .ev_controller import EVStateClass
         if ev_state.last_state_class == EVStateClass.DISCONNECTED:
             return "disconnected"
+        # Mode-based checks come BEFORE activity-based ones so a stale
+        # last_written_current_a from a previous session doesn't bleed
+        # through after switching to 'off' or 'car'.
+        if ev_state.last_mode == "off":
+            return "off"
+        if ev_state.last_mode == "car":
+            return "car_mode"
         if c.result and c.result.slots and c.result.slots[0].p_ev_chg_kw > 0:
             return "charging_lp_planned"
         if ev_state.cheap_grid_active:
