@@ -1,5 +1,9 @@
 # EV Charging Support — Design
 
+> **Note (2026-06-01):** EV-mode portions of this spec were superseded by
+> `2026-06-01-ev-mode-redesign-design.md`. The amendments are folded in
+> below; see the redesign spec for the rationale.
+
 ## 1. Purpose
 
 Extend `pv_optimizer` to control an EV charger as part of the household
@@ -15,20 +19,20 @@ Two charging regimes are supported:
 - **Reactive** — otherwise, a per-tick controller decides whether/how much
   to charge based on PV surplus and a configurable cheap-grid price floor.
 
-A `manual` override and an `off` bypass complete the user-facing mode set.
+A `car` mode (sticky max-current) and an `off` bypass complete the user-facing mode set.
 
 ## 2. Operational Modes
 
 A single integration-created `select.pv_optimizer_ev_mode` entity governs
 top-level behaviour. Default `auto`.
 
-| Mode | Behaviour |
-|---|---|
-| `auto` | If car connected AND target > 0 AND deadline > now → LP-planned path. Else → reactive path. |
-| `manual` | Force max-current to `ev_max_charging_current_a` every tick; auto-return to `auto` on session-done (§6). |
-| `off` | Integration writes nothing to any EV output entity. Diagnostic sensors continue to read inputs. |
+| Mode  | Behaviour |
+|-------|-----------|
+| `auto` | If car connected AND `target_kwh > 0` AND `deadline > now` → LP-planned path. Else → reactive path (cheap-grid predicate + surplus tracking via EVCS). Does **not** react to the car's `CONNECTED_REQUESTING` + low-power signal. |
+| `car`  | Writes ACTIVE charger mode + `max_charging_current_a` + start switch ON every tick. **Sticky** by default — stays until the user explicitly switches back. Auto-returns to `auto` on session-done **only** when `switch.pv_optimizer_ev_car_auto_return` is ON (default OFF). |
+| `off`  | Integration writes nothing to any EV output entity. Diagnostic sensors continue to read inputs. |
 
-Mode transitions are user-driven except the `manual → auto` auto-return.
+Mode transitions are user-driven. The `car → auto` auto-return is optional, gated by `switch.pv_optimizer_ev_car_auto_return`.
 
 ## 3. Configuration Surface
 
@@ -91,17 +95,18 @@ which is the most conservative classification).
 
 **Caveat (documented in README, not encoded):** some chargers collapse the
 `connected_requesting` state to `connected_idle` when the integration sets
-`max_current = 0` in the charger's "manual" mode. For chargers where that's
+`max_current = 0` in the charger's "car" mode. For chargers where that's
 the case (EVCS NS included), the user can either configure
 `ev_charger_mode_entity` to enable mode-switching (§4.1) or accept the
-trade-off that ultimate-override (§4.3) works only when the request signal
-survives suppression.
+trade-off that the cheap-grid predicate (§4.1) works only when the request
+signal survives suppression.
 
 ### 3.4 Integration-created entities
 
 | Entity | Purpose |
 |---|---|
-| `select.pv_optimizer_ev_mode` | `auto` / `manual` / `off`, default `auto`. |
+| `select.pv_optimizer_ev_mode` | `auto` / `car` / `off`, default `auto`. |
+| `switch.pv_optimizer_ev_car_auto_return` | When ON, `car` mode auto-returns to `auto` on session-done. Default OFF (sticky). |
 | `number.pv_optimizer_ev_target_kwh` | Current session target in kWh. |
 | `number.pv_optimizer_ev_target_pct` | Same target expressed as % of `ev_car_battery_kwh`. Writing one updates the other. |
 | `datetime.pv_optimizer_ev_deadline` | Deadline for the LP-planned charging. |
@@ -117,46 +122,34 @@ Resting state: charger in its native solar-only / passive mode (e.g. EVCS NS
 "Auto"), `max_current = ev_max_charging_current_a`. The charger handles
 surplus natively and keeps the request signal clean.
 
-The integration uses two **latches** — `cheap_grid_latch` and
-`ultimate_override_latch`. Each has independent trigger and release
-conditions. The charger is switched to active-control mode (e.g. EVCS
-NS "Manual") whenever **any** latch is set, and only returns to passive
-when **all** latches have released.
+Per tick the integration evaluates a single **cheap-grid predicate**:
 
-| Latch | Trigger | Release |
-|---|---|---|
-| `cheap_grid_latch` | `price_buy[now] ≤ ev_buy_price_threshold` | `price_buy[now] > ev_buy_price_threshold` for ≥ 1 tick |
-| `ultimate_override_latch` | `connected_requesting` AND `ev_charging_power < ev_session_done_power_w` for ≥ 1 tick | state classification leaves `connected_requesting` for ≥ `ev_session_done_seconds` |
+```
+cheap_grid_active = price_buy[now] <= ev_buy_price_threshold
+```
 
-The asymmetric release on `ultimate_override_latch` is essential: once
-the integration steps in to power a denied request and the car starts
-charging, the state stays `connected_requesting` (e.g. EVCS NS reports
-`Charging`) but `ev_charging_power` rises above the threshold —
-re-evaluating the trigger condition would flap. Release is instead tied
-to the car no longer requesting at all (state classifies to
-`connected_idle` or `disconnected`), with the same dwell used for
-session-done detection in §6.
+This is a per-tick Boolean — no trigger/release asymmetry. When `cheap_grid_active`
+is True, the integration switches the charger to active-control mode (e.g. EVCS
+NS "Manual") and writes `max_current = ev_max_charging_current_a`. When False,
+the charger returns to its passive resting mode and the EVCS handles surplus
+natively.
 
-When any latch is set, `max_current = ev_max_charging_current_a`. Manual
-override is handled at the outer mode level (§6) rather than as a latch
-here.
+Car mode is handled at the outer mode level (§6) rather than here.
 
 ### 4.2 Without mode-switching (`ev_charger_mode_entity` not configured)
 
 In this branch the charger is assumed to be in its active-control mode at
 all times (a one-time setup by the user). The integration is solely
-responsible for the surplus / cheap-grid / ultimate-override decisions.
+responsible for the surplus / cheap-grid decisions.
 
 Per planner tick:
 
 1. Classify `ev_charger_state` → `disconnected` / `connected_idle` /
    `connected_requesting`.
 2. **`disconnected`** → `max_current = 0`; bail.
-3. **`connected_requesting`** → `max_current = ev_max_charging_current_a`
-   (ultimate-override, §4.3).
-4. **Cheap grid** (`price_buy[now] ≤ ev_buy_price_threshold`) →
+3. **Cheap grid** (`price_buy[now] ≤ ev_buy_price_threshold`) →
    `max_current = ev_max_charging_current_a`.
-5. **Else — surplus tracking:**
+4. **Else — surplus tracking:**
 
    ```
    surplus_kw = max(0, (-grid_power_w + ev_charging_power_w) / 1000)
@@ -179,25 +172,13 @@ written value by more than `ev_current_tolerance_a`. Dropping to 0
 requires sustained-below-min for one tick (avoids reacting to a single-tick
 surplus dip).
 
-### 4.3 Ultimate-override semantics
-
-When the state vocabulary classifies the current state as
-`connected_requesting`, the car has actively negotiated for power (J1772
-state C). In that case the reactive path permits charging regardless of
-surplus or price — the user's intent expressed via the car (Tesla app,
-in-car schedule, "charge now" button) is treated as authoritative.
-
-With mode-switching configured this falls out for free because the
-charger's native mode handles it. Without mode-switching, branch (3) in §4.2
-encodes it explicitly.
-
-### 4.4 Start switch
+### 4.3 Start switch
 
 If `ev_start_switch_entity` is configured, the integration writes `on`
 whenever `max_current > 0` and `off` when `max_current = 0`. Some chargers
 need both signals to actually deliver power.
 
-### 4.5 Cadence
+### 4.4 Cadence
 
 Runs at the existing planner cadence (`update_seconds`, default 300 s).
 Sufficient for typical surplus tracking on residential PV; users wanting
@@ -264,10 +245,8 @@ opportunistic charging.
 ### 5.3 Slot-0 translation
 
 ```
-if connected_requesting AND ev_charging_power < ev_session_done_power_w:
-    # Ultimate-override: car wants power and isn't getting it.
-    # Honour regardless of the LP plan for this slot.
-    max_current = ev_max_charging_current_a
+if state_class == DISCONNECTED:
+    max_current = 0
 elif p_ev_chg[0] == 0:
     max_current = 0
 else:
@@ -282,19 +261,17 @@ committed to a target, so a minor slot-0 overshoot is acceptable. The
 next tick re-plans with reduced `remaining_kwh`. This contrasts with the
 reactive path's skip-below-min (§4.2) and is intentional.
 
-The ultimate-override branch takes precedence over the LP plan for the
-same reason it does in the reactive path (§4.1, §4.2): the car
-expressing intent (in-car schedule, app "charge now") is treated as
-authoritative even at peak grid prices.
+When the LP plans `p_ev_chg[0] = 0`, the planner writes `0` even if the
+car is in `CONNECTED_REQUESTING` state — the user's LP plan takes
+precedence over the car's request signal.
 
 ### 5.4 Mode switching
 
 If `ev_charger_mode_entity` is configured, the charger is switched to its
 active-control mode (e.g. EVCS NS "Manual") whenever the slot-0 logic
-above writes a non-zero `max_current` — i.e., either `p_ev_chg[0] > 0`
-or the ultimate-override branch fires. When the slot-0 write is 0, the
-charger returns to its resting passive mode. Same dwell hysteresis as
-§4.1.
+above writes a non-zero `max_current` — i.e., when `p_ev_chg[0] > 0`.
+When the slot-0 write is 0, the charger returns to its resting passive
+mode. Same dwell hysteresis as §4.1.
 
 ### 5.5 Session reset
 
@@ -303,11 +280,11 @@ integrator (`energy_delivered_session_kwh = 0`). The user's `target_kwh`
 entity is **not** auto-reset — it persists across sessions until the user
 changes it.
 
-## 6. Manual Override and Off Modes
+## 6. Car Mode and Off Modes
 
-### 6.1 Manual override (`mode = manual`)
+### 6.1 Car mode (`mode = car`)
 
-Per tick while in manual:
+Per tick while in car mode:
 
 - `max_current = ev_max_charging_current_a`
 - If `ev_start_switch_entity` configured → `on`
@@ -315,22 +292,29 @@ Per tick while in manual:
 
 Setpoint-write tolerance (§4) still applies.
 
-**Auto-return to `auto`** when "session done" fires, defined as either:
+`car` mode is **sticky by default** — it stays until the user explicitly
+switches back to `auto` or `off`. No auto-exit occurs unless
+`switch.pv_optimizer_ev_car_auto_return` is ON.
+
+**Optional auto-return** (requires `switch.pv_optimizer_ev_car_auto_return` =
+ON): auto-return to `auto` when "session done" fires, defined as either:
 
 - `ev_charger_state` classifies to `disconnected`, OR
 - `ev_charger_state` classifies to `connected_idle` AND
   `ev_charging_power < ev_session_done_power_w` for ≥
-  `ev_session_done_seconds`.
+  `ev_session_done_seconds`, AND the car has drawn ≥ `ev_session_done_power_w`
+  at some point during the session (guards against EVCS-side gating
+  false-positives).
 
-When session-done fires the integration writes `auto` back into
-`select.pv_optimizer_ev_mode`.
+When session-done fires and auto-return is ON, the integration writes `auto`
+back into `select.pv_optimizer_ev_mode`.
 
-Interaction with LP target: manual override fully precedes the LP path
-while engaged. After auto-return, if `remaining_kwh > 0` and `deadline >
-now` and the car is still plugged in (rare — typically only when the car
-physically reached full before the LP target was reached), the LP path
-resumes on the next tick. Harmless — the car won't draw more than its
-physical capacity allows.
+Interaction with LP target: car mode fully precedes the LP path while
+engaged. After auto-return, if `remaining_kwh > 0` and `deadline > now` and
+the car is still plugged in (rare — typically only when the car physically
+reached full before the LP target was reached), the LP path resumes on the
+next tick. Harmless — the car won't draw more than its physical capacity
+allows.
 
 ### 6.2 Off mode (`mode = off`)
 
@@ -344,9 +328,20 @@ observer. No auto-exit — user explicitly changes the mode select to leave.
 
 Created by the integration:
 
-- `sensor.pv_optimizer_ev_status` — `disconnected`, `idle`,
-  `charging_surplus`, `charging_cheap_grid`, `charging_lp_planned`,
-  `charging_ultimate_override`, `manual_override`, `off`.
+- `sensor.pv_optimizer_ev_status` — one of the following strings,
+  evaluated in precedence order (first match wins):
+  1. `disconnected` — `state_class == DISCONNECTED`.
+  2. `off` — mode is `off`.
+  3. `car_mode` — mode is `car`, regardless of LP plan or power flow.
+  4. `charging_lp_planned` — LP plan slot 0 has `p_ev_chg_kw > 0`.
+  5. `charging_cheap_grid` — auto + reactive + `cheap_grid_active`.
+  6. `charging_surplus` — auto + reactive + last written current > 0.
+  7. `idle` — connected, none of the above.
+
+  The mode-based checks (`off`, `car_mode`) come before the
+  activity-based ones so a stale `last_written_current_a` from a
+  previous session does not bleed through after switching modes.
+
 - `sensor.pv_optimizer_ev_session_energy_kwh` — energy delivered since
   last plug-in event.
 - `sensor.pv_optimizer_ev_remaining_kwh` — `max(0, target_kwh -
@@ -372,9 +367,10 @@ power as part of the same plan series.
   logged.
 - **Mid-session disconnect/reconnect:** session integrator resets on the
   next `disconnected → connected` transition; `target_kwh` persists.
-- **Manual override while car already full:** integration writes max,
-  charger reports `Charged`, session-done fires on the next tick, mode
-  returns to auto. Slight churn, no harm.
+- **Car mode + auto-return OFF while car already full:** integration
+  writes max current every tick indefinitely. Charger reports `Charged`
+  but no session-done exit occurs — the planner just keeps writing
+  every tick with no auto-return. User must manually switch mode to exit.
 - **Config error** (`ev_max_charging_current_a ≤ 0`, `ev_max_charging_power_kw ≤ 0`):
   rejected at config-flow validation.
 - **Output write ordering per tick:** mode → start switch → max_current.
@@ -389,13 +385,12 @@ Mirrors PRD §10.
   regression no-op (no variables created when EV inputs are absent).
 - `tests/test_planner.py` extended: state-vocabulary classification
   (default + override), reactive surplus tracking convergence with the
-  `+ ev_charging_power_w` term, ultimate-override branch on
-  `connected_requesting`, mode-switching (configured / unconfigured),
-  cheap-grid branch, skip-below-min, manual override + auto-return,
-  off-mode write-suppression, plug-in session integrator reset.
+  `+ ev_charging_power_w` term, mode-switching (configured / unconfigured),
+  cheap-grid branch, skip-below-min, car mode + auto-return switch
+  (ON/OFF), off-mode write-suppression, plug-in session integrator reset.
 - `tests/test_ev_controller.py` (new, mirroring
   `tests/test_load_forecaster.py`): the pure reactive decision function
-  — surplus math, ultimate-override gate, min-current floor, hysteresis.
+  — surplus math, cheap-grid predicate, min-current floor, hysteresis.
 
 HA-side files (`coordinator.py`, `config_flow.py`, `sensor.py`) remain
 thin shims and are exercised in a live HA instance, not in this
