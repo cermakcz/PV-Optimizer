@@ -594,9 +594,19 @@ class Planner:
         source as the LP — otherwise the sensor would show the never-
         updated integrator field while the LP correctly tracks the
         external entity.
+
+        When the car is physically disconnected, returns 0 regardless of
+        what the external sensor / internal integrator is holding. Many
+        EVCS firmwares only reset their session counter on plug-in, so
+        between sessions the entity reports the *previous* session's
+        total — without this guard the planner would conclude the target
+        is already met and skip a freshly scheduled session.
         """
         ev_cfg = self.config.ev
         if ev_cfg is None:
+            return 0.0
+        if (classify_state(self._read_text(ev_cfg.charger_state_entity))
+                == EVStateClass.DISCONNECTED):
             return 0.0
         if ev_cfg.session_energy_entity:
             return self._read_float_optional(

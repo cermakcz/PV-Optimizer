@@ -1571,6 +1571,53 @@ def test_session_energy_kwh_reads_external_entity_when_configured() -> None:
     assert p.session_energy_kwh() == pytest.approx(3.7, abs=1e-6)
 
 
+def test_session_energy_kwh_returns_zero_when_disconnected() -> None:
+    """Many EVCS firmwares only reset their external session counter on
+    plug-in, so while the car is unplugged the entity reports the *last*
+    session's total. Without a guard the planner would compute
+    ``remaining = target - stale_value`` and skip a freshly scheduled
+    session. ``session_energy_kwh()`` must return 0 whenever the charger
+    state classifies as DISCONNECTED, regardless of what the entity holds.
+    """
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        session_energy_entity="sensor.ev_session_energy",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+        planned_start_entity="datetime.pv_optimizer_ev_planned_start",
+    )
+    # Cheap slot 0 (0.05), expensive others (0.30); target = 10 kWh,
+    # external entity still reports last session's 10 kWh while unplugged.
+    states = _states(buy=[0.05] + [0.30] * 23)
+    states["sensor.ev_state"] = StateView(state="Disconnected")
+    states["sensor.ev_power"] = StateView(state="0")
+    states["sensor.ev_session_energy"] = StateView(state="10.0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="10")
+    deadline = (NOW + timedelta(hours=3)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_deadline"] = StateView(state=deadline)
+    planned_start = (NOW + timedelta(hours=1)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_planned_start"] = StateView(
+        state=planned_start)
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+    assert p.session_energy_kwh() == 0.0
+    cycle = p.step(NOW)
+    # Despite the stale 10 kWh on the entity, LP must plan the full target.
+    assert cycle.result is not None
+    total_planned = sum(s.p_ev_chg_kw * s.duration_h
+                        for s in cycle.result.slots)
+    assert total_planned > 0
+
+
 def test_planner_resets_session_energy_on_plug_in() -> None:
     from custom_components.pv_optimizer.planner import EVConfig
     from custom_components.pv_optimizer.models import EVParams
