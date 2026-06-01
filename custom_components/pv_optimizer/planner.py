@@ -757,6 +757,12 @@ class Planner:
         if mode == "car":
             car_auto_return = self._read_bool_optional(
                 cfg.car_auto_return_entity, default=False)
+            if not car_auto_return:
+                # Bookkeeping only runs while auto-return is enabled; clear
+                # any stale flag from a prior switch-ON window so a later
+                # re-enable starts from a fresh "no charging seen yet"
+                # baseline.
+                es.car_session_charging_seen = False
             if car_auto_return:
                 if ev_power_w >= cfg.params.session_done_power_w:
                     es.car_session_charging_seen = True

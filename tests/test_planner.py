@@ -1584,6 +1584,62 @@ def test_planner_car_mode_sticky_after_session_when_auto_return_off() -> None:
     assert not mode_writes, "car mode is sticky — finished session must not bounce back to auto"
 
 
+def test_planner_car_mode_auto_return_toggle_resets_session_seen() -> None:
+    """ON→OFF→ON toggle on the auto-return switch resets the
+    'charging seen' flag, so a subsequent idle dwell does not trigger
+    a stale auto-return."""
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        start_switch_entity="switch.ev_start",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+        car_auto_return_entity="switch.pv_optimizer_ev_car_auto_return",
+    )
+    states = _states()
+    states["sensor.ev_state"] = StateView(state="Charging")
+    states["sensor.ev_power"] = StateView(state="6000")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["switch.ev_start"] = StateView(state="off")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="car")
+    states["switch.pv_optimizer_ev_car_auto_return"] = StateView(state="on")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
+
+    # Tick 1: switch ON, car charging — flag flips to True.
+    p.step(NOW)
+    assert p.ev_state.car_session_charging_seen is True
+
+    # User flips the auto-return switch OFF mid-session. State still
+    # 'car' and car still connected. Power has tapered to 0 (perhaps
+    # the EVCS is now gating).
+    states["switch.pv_optimizer_ev_car_auto_return"] = StateView(state="off")
+    states["sensor.ev_state"] = StateView(state="Charged")
+    states["sensor.ev_power"] = StateView(state="0")
+    p.step(NOW + timedelta(seconds=30))
+    assert p.ev_state.car_session_charging_seen is False, (
+        "switch flipping OFF must clear the stale charging-seen flag"
+    )
+
+    # Re-enable the switch. Without the reset, the stale True flag plus
+    # idle+low-power dwell would trip auto-return on the very next tick.
+    # With the reset, it must NOT.
+    states["switch.pv_optimizer_ev_car_auto_return"] = StateView(state="on")
+    p.step(NOW + timedelta(seconds=180))
+    mode_writes = [c for c in p.caller.calls
+                   if c[2].get("entity_id") == "select.pv_optimizer_ev_mode"]
+    assert not mode_writes, (
+        "stale charging-seen must not survive a switch toggle and trigger auto-return"
+    )
+
+
 def test_planner_integrates_session_energy_when_no_sensor() -> None:
     """Without ev_session_energy_entity, planner integrates ev_charging_power_entity."""
     from custom_components.pv_optimizer.planner import EVConfig
