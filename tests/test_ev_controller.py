@@ -401,7 +401,7 @@ def test_translate_disconnected_yields_zero() -> None:
     assert translate_lp_slot0(
         p_ev_chg_kw=0.0,
         state_class=EVStateClass.DISCONNECTED,
-        ev_charging_power_w=0.0, ev=ev,
+        ev=ev,
     ) == 0
 
 
@@ -410,7 +410,7 @@ def test_translate_lp_zero_yields_zero() -> None:
     assert translate_lp_slot0(
         p_ev_chg_kw=0.0,
         state_class=EVStateClass.CONNECTED_IDLE,
-        ev_charging_power_w=0.0, ev=ev,
+        ev=ev,
     ) == 0
 
 
@@ -420,7 +420,7 @@ def test_translate_lp_positive_above_min_converts_to_amps() -> None:
     assert translate_lp_slot0(
         p_ev_chg_kw=4.0,
         state_class=EVStateClass.CONNECTED_IDLE,
-        ev_charging_power_w=0.0, ev=ev,
+        ev=ev,
     ) == 10
 
 
@@ -431,7 +431,7 @@ def test_translate_lp_below_min_clamps_up_to_floor() -> None:
     assert translate_lp_slot0(
         p_ev_chg_kw=1.0,
         state_class=EVStateClass.CONNECTED_IDLE,
-        ev_charging_power_w=0.0, ev=ev,
+        ev=ev,
     ) == 6
 
 
@@ -440,15 +440,28 @@ def test_translate_lp_above_max_clamps_down() -> None:
     assert translate_lp_slot0(
         p_ev_chg_kw=100.0,
         state_class=EVStateClass.CONNECTED_IDLE,
-        ev_charging_power_w=0.0, ev=ev,
+        ev=ev,
     ) == 20
 
 
-def test_translate_ultimate_override_beats_lp_zero() -> None:
-    """Car requesting and not drawing -> max regardless of LP plan."""
+def test_translate_lp_zero_yields_zero_even_when_requesting() -> None:
+    """LP plan of 0 yields 0 A regardless of car state — the user's plan
+    is authoritative, not the car's request signal."""
     ev = _ev()
     assert translate_lp_slot0(
         p_ev_chg_kw=0.0,
         state_class=EVStateClass.CONNECTED_REQUESTING,
-        ev_charging_power_w=0.0, ev=ev,
-    ) == 20
+        ev=ev,
+    ) == 0
+
+
+def test_translate_lp_positive_when_requesting_uses_lp_value() -> None:
+    """REQUESTING with a positive LP plan: current is derived from the
+    LP-planned watts, not from the charger's max."""
+    ev = _ev()
+    # 4 kW / 0.4 kw/A = 10 A.
+    assert translate_lp_slot0(
+        p_ev_chg_kw=4.0,
+        state_class=EVStateClass.CONNECTED_REQUESTING,
+        ev=ev,
+    ) == 10

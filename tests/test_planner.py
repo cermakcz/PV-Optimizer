@@ -1050,7 +1050,10 @@ def test_planner_config_with_ev_config() -> None:
 
 
 def test_planner_reads_ev_state_no_target_runs_reactive() -> None:
-    """When target=0, planner uses the reactive path: writes max_current."""
+    """When target=0, planner uses the reactive path with surplus tracking.
+
+    With no surplus and an above-threshold price, the reactive path returns 0 A.
+    """
     from custom_components.pv_optimizer.planner import EVConfig
     from custom_components.pv_optimizer.models import EVParams
     ev_params = EVParams(
@@ -1077,11 +1080,11 @@ def test_planner_reads_ev_state_no_target_runs_reactive() -> None:
     cfg = _config(ev=ev_cfg)
     p = Planner(cfg, reader, caller)
     p.step(NOW)
-    # Reactive path with state=Charging -> ultimate-override -> max_current = 20.
+    # Reactive path: grid=0, ev_power=0 -> no surplus -> max_current = 0.
     ev_writes = [c for c in caller.calls if c[2].get("entity_id") == "number.ev_max_current"]
     assert ev_writes, "planner should write to ev_max_current"
     last = ev_writes[-1]
-    assert last == ("number", "set_value", {"entity_id": "number.ev_max_current", "value": 20})
+    assert last == ("number", "set_value", {"entity_id": "number.ev_max_current", "value": 0})
 
 
 def test_planner_off_mode_writes_nothing_to_ev() -> None:

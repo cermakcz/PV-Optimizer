@@ -783,7 +783,7 @@ class Planner:
             current = translate_lp_slot0(
                 p_ev_chg_kw=plan_first.p_ev_chg_kw,
                 state_class=state_class,
-                ev_charging_power_w=ev_power_w, ev=cfg.params,
+                ev=cfg.params,
             )
             # Same mode-first ordering rationale as the manual branch above.
             if current > 0:
