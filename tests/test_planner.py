@@ -1770,7 +1770,7 @@ def test_planner_reactive_mode_switch_writes_correct_option_strings() -> None:
     mode_writes = [c for c in p.caller.calls
                    if c[2].get("entity_id") == "select.ev_mode"]
     assert mode_writes and mode_writes[-1][2]["option"] == "Auto"
-    # Tick 2: cheap buy (0.0 ≤ 0.0) → cheap_grid latch → active branch → "Manual".
+    # Tick 2: cheap buy (0.0 ≤ 0.0) → cheap_grid_active → active branch → "Manual".
     states["sensor.buy"] = StateView(state="0.00",
                                      attributes={"today": [0.0] * 24})
     p.step(NOW + timedelta(seconds=300))

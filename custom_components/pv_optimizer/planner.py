@@ -18,12 +18,10 @@ from .const import BAD_STATES as _BAD_STATES
 from .ev_controller import (
     DEFAULT_STATE_VOCAB,
     EVStateClass,
-    LatchState,
     classify_state,
     decide_reactive,
     is_session_done,
     translate_lp_slot0,
-    update_latches,
 )
 from .load_forecaster import LoadForecaster
 from .models import (
@@ -48,11 +46,10 @@ _FORCE_EPS = 1e-3
 
 @dataclass
 class EVRuntimeState:
-    """Per-planner mutable EV state — latches + dwell timers."""
+    """Per-planner mutable EV state — cheap_grid flag + dwell timers."""
 
-    latches: "LatchState" = None
+    cheap_grid_active: bool = False
     last_state_class: "EVStateClass" = None
-    state_class_since: datetime | None = None
     low_power_since: datetime | None = None
     last_written_current_a: int | None = None
     # Tracks the previously written role ("active" / "passive") on the
@@ -216,7 +213,7 @@ class Planner:
         self.live_averager = live_averager
         self.last: PlanCycle | None = None
         self.ev_state: EVRuntimeState | None = (
-            EVRuntimeState(latches=LatchState()) if config.ev is not None else None
+            EVRuntimeState() if config.ev is not None else None
         )
         self._cached_first_buy_price: float = 0.0
         self._cached_ev_remaining_kwh: float = 0.0
@@ -700,7 +697,7 @@ class Planner:
             return
         mode = self._read_mode()  # "auto" / "car" / "off"
         # Future-planned-start gate: in auto mode, suppress all EV writes
-        # (LP plan, reactive cheap-grid latch, mode/current/start) until
+        # (LP plan, reactive cheap-grid path, mode/current/start) until
         # the scheduled start time rolls past. Car mode explicitly
         # overrides — user intent beats schedule.
         if mode == "auto":
@@ -739,11 +736,6 @@ class Planner:
         # Update dwells.
         if es.last_state_class != state_class:
             es.last_state_class = state_class
-            es.state_class_since = now
-        time_in_class = (
-            (now - es.state_class_since).total_seconds()
-            if es.state_class_since is not None else 0.0
-        )
         if ev_power_w < cfg.params.session_done_power_w:
             if es.low_power_since is None:
                 es.low_power_since = now
@@ -801,17 +793,12 @@ class Planner:
             self._write_ev_start(current > 0)
             return
         # Reactive path.
+        es.cheap_grid_active = price_buy <= cfg.params.buy_price_threshold
         if cfg.charger_mode_entity:
-            # Mode-switching variant: latches drive mode + max-current.
-            es.latches = update_latches(
-                es.latches,
-                state_class=state_class,
-                price_buy=price_buy,
-                ev_charging_power_w=ev_power_w,
-                time_in_current_class_s=time_in_class,
-                ev=cfg.params,
-            )
-            if es.latches.any_set:
+            # Mode-switching variant: cheap-grid drives the mode flip. When
+            # not cheap, hand back to the EVCS (passive + max so its own
+            # surplus/solar logic decides).
+            if es.cheap_grid_active:
                 self._write_ev_charger_mode_active()
                 self._write_ev_current(cfg.params.max_charging_current_a)
                 self._write_ev_start(True)

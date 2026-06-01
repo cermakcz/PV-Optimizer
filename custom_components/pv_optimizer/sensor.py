@@ -209,12 +209,9 @@ class _EVStatusSensor(_Base):
         from .ev_controller import EVStateClass
         if ev_state.last_state_class == EVStateClass.DISCONNECTED:
             return "disconnected"
-        latches = ev_state.latches
         if c.result and c.result.slots and c.result.slots[0].p_ev_chg_kw > 0:
             return "charging_lp_planned"
-        if latches and getattr(latches, "ultimate_override", False):
-            return "charging_ultimate_override"
-        if latches and getattr(latches, "cheap_grid", False):
+        if ev_state.cheap_grid_active:
             return "charging_cheap_grid"
         if ev_state.last_written_current_a and ev_state.last_written_current_a > 0:
             return "charging_surplus"
