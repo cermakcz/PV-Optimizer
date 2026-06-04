@@ -279,3 +279,22 @@ def test_ev_subtraction_partial_history() -> None:
     out = fc.forecast([target])
     assert out.kw_per_slot[target] == pytest.approx(4.0)
     assert out.days_used_per_slot[target] == 7
+
+
+def test_ev_subtraction_disabled_per_call() -> None:
+    """Capability wired but subtract_ev=False → no subtraction; raw load."""
+    reader = _MultiHistory({
+        "sensor.load_w": _constant_stream(8.0),
+        "sensor.ev_w": _constant_stream(3.0),
+    })
+    fc = LoadForecaster(
+        LoadForecasterConfig(
+            entity_id="sensor.load_w",
+            ev_power_entity_id="sensor.ev_w",
+        ),
+        reader,
+    )
+    out = fc.forecast(_slots(2), subtract_ev=False)
+    for s in _slots(2):
+        assert out.kw_per_slot[s] == pytest.approx(8.0)
+    assert out.ev_subtracted is False
