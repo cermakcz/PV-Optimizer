@@ -1934,3 +1934,59 @@ def test_planner_reactive_mode_transition_re_asserts_current() -> None:
         "mode flip must re-assert current (firmware may reset register)"
     )
     assert current_writes[-1][2]["value"] == 20
+
+
+def test_planner_forecaster_subtract_ev_gated_on_auto_mode() -> None:
+    """Planner reads EV mode; subtract_ev=True only in auto, False in car/off."""
+
+    class _SpyForecaster:
+        """Stand-in for LoadForecaster that records the subtract_ev kwarg."""
+
+        def __init__(self) -> None:
+            self.calls: list[bool] = []
+            self.last_forecast = None
+
+        def forecast(self, slot_starts, *, subtract_ev: bool = True):
+            self.calls.append(subtract_ev)
+            from custom_components.pv_optimizer.load_forecaster import LoadForecast
+            kw = {s: 1.0 for s in slot_starts}
+            used = {s: 7 for s in slot_starts}
+            self.last_forecast = LoadForecast(
+                kw_per_slot=kw, days_used_per_slot=used,
+                ev_subtracted=subtract_ev,
+            )
+            return self.last_forecast
+
+    # Build a planner config with an EV binding so cfg.ev is not None.
+    # Use the same EV-config shape the existing car/off tests use.
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=7.4, max_charging_current_a=32.0,
+            min_charging_current_a=6.0, car_battery_kwh=50.0,
+        ),
+        charger_state_entity="sensor.evcs_state",
+        charging_power_entity="sensor.ev_power_w",
+        max_current_entity="number.ev_current",
+        mode_entity="select.pv_optimizer_ev_mode",
+    )
+    base_states = _states(buy=[0.10] * 24, sell=[0.05] * 24, load_w=1000.0)
+    base_states["sensor.evcs_state"] = StateView(state="disconnected")
+    base_states["sensor.ev_power_w"] = StateView(state="0")
+
+    for mode, expected in (("auto", True), ("car", False), ("off", False)):
+        states = dict(base_states)
+        states["select.pv_optimizer_ev_mode"] = StateView(state=mode)
+        spy = _SpyForecaster()
+        planner = Planner(
+            _config(ev=ev_cfg),
+            FakeReader(states),
+            FakeCaller(),
+            load_forecaster=spy,
+        )
+        planner.step(NOW)
+        assert spy.calls, f"forecaster not called in mode={mode}"
+        assert spy.calls[-1] is expected, (
+            f"mode={mode} expected subtract_ev={expected}, got {spy.calls[-1]}"
+        )

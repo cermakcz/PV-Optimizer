@@ -672,7 +672,14 @@ class Planner:
                             for s in slot_starts]
             return [max(0.0, fallback_kw)] * len(slot_starts)
         if self.load_forecaster is not None:
-            fc = self.load_forecaster.forecast(slot_starts)
+            # Subtract EV history from the load forecast only in auto mode,
+            # where the LP separately models p_ev_chg. In car/off the planner
+            # ignores/suppresses LP-side EV writes, so historical EV is
+            # legitimate opaque household load that the LP must plan around.
+            subtract_ev = (
+                self.config.ev is not None and self._read_mode() == "auto"
+            )
+            fc = self.load_forecaster.forecast(slot_starts, subtract_ev=subtract_ev)
             return [fc.kw_per_slot.get(s, max(0.0, fallback_kw)) if fc.days_used_per_slot.get(s, 0) > 0
                     else max(0.0, fallback_kw) for s in slot_starts]
         return [max(0.0, fallback_kw)] * len(slot_starts)
