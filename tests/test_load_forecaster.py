@@ -238,3 +238,44 @@ def test_ev_subtraction_clamps_at_zero() -> None:
     out = fc.forecast(_slots(2))
     for s in _slots(2):
         assert out.kw_per_slot[s] == pytest.approx(0.0)
+
+
+def test_ev_subtraction_partial_history() -> None:
+    """EV history exists for some lookback days, not others.
+
+    Target hour: 12:00. Load is constant 8 kW for all 7 lookback days.
+    EV draws 4 kW only at hour 12 on 4 of the 7 days (the most recent 4),
+    nothing on the earlier 3.
+
+    Per-day corrected contributions: [4, 4, 4, 4, 8, 8, 8] → median 4.0 kW.
+    Without partial-history handling the test would crash (None - 4) or
+    drop the EV-less days entirely.
+    """
+    load_stream = _constant_stream(8.0)
+
+    # Build EV stream covering only the four most recent lookback days at
+    # hour 12 (one sample at hour 12, then zero immediately after to end
+    # the step). Empty entries on day 5/6/7 → no EV samples in those
+    # buckets → ev_avg becomes None → treated as 0 → load passes through.
+    ev_samples: list[tuple[datetime, float]] = []
+    for d in (1, 2, 3, 4):
+        h12 = (NOW - timedelta(days=d)).replace(hour=12, minute=0, second=0)
+        ev_samples.append((h12, 4.0))
+        ev_samples.append((h12 + timedelta(hours=1), 0.0))
+
+    reader = _MultiHistory({
+        "sensor.load_w": load_stream,
+        "sensor.ev_w": ev_samples,
+    })
+    fc = LoadForecaster(
+        LoadForecasterConfig(
+            entity_id="sensor.load_w",
+            ev_power_entity_id="sensor.ev_w",
+        ),
+        reader,
+    )
+    # Forecast the 12:00 slot specifically.
+    target = NOW.replace(hour=12, minute=0, second=0)
+    out = fc.forecast([target])
+    assert out.kw_per_slot[target] == pytest.approx(4.0)
+    assert out.days_used_per_slot[target] == 7
