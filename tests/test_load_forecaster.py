@@ -49,6 +49,44 @@ def _constant_history(value_kw: float, days: int = 10,
     return FakeHistory(samples)
 
 
+class _MultiHistory:
+    """Per-entity step-wise history with carry-forward.
+
+    Mirrors FakeHistory's contract but dispatches by entity_id so a single
+    reader can return distinct streams for the load and EV power entities.
+    """
+
+    def __init__(self, by_entity: dict[str, list[tuple[datetime, float]]]) -> None:
+        self._by_entity = {
+            k: sorted(v, key=lambda s: s[0]) for k, v in by_entity.items()
+        }
+
+    def get_history(self, entity_id: str, start: datetime, end: datetime
+                    ) -> list[tuple[datetime, float]]:
+        samples = self._by_entity.get(entity_id, [])
+        carry: list[tuple[datetime, float]] = []
+        in_win: list[tuple[datetime, float]] = []
+        for ts, v in samples:
+            if ts <= start:
+                carry = [(ts, v)]
+            elif ts < end:
+                in_win.append((ts, v))
+        return carry + in_win
+
+
+def _constant_stream(value_kw: float, days: int = 10,
+                     step_minutes: int = 15) -> list[tuple[datetime, float]]:
+    """Build a constant-value sample stream covering [NOW - days, NOW + 1d)."""
+    base = NOW - timedelta(days=days)
+    cursor = base
+    end = NOW + timedelta(hours=24)
+    samples = []
+    while cursor < end:
+        samples.append((cursor, value_kw))
+        cursor += timedelta(minutes=step_minutes)
+    return samples
+
+
 # ---------------------------------------------------------------------------
 # _bucket_average_kw
 # ---------------------------------------------------------------------------
@@ -172,3 +210,28 @@ def test_weekday_aware_uses_only_matching_weekdays() -> None:
     out = fc.forecast([NOW])
     assert out.kw_per_slot[NOW] == pytest.approx(1.5)
     assert out.days_used_per_slot[NOW] == 2  # NOW-7d and NOW-14d are both Fri
+
+
+# ---------------------------------------------------------------------------
+# EV-corrected load forecast
+# ---------------------------------------------------------------------------
+
+
+def test_ev_subtraction_full_history() -> None:
+    """Constant 8 kW load with constant 3 kW EV draw → 5 kW corrected median."""
+    reader = _MultiHistory({
+        "sensor.load_w": _constant_stream(8.0),
+        "sensor.ev_w": _constant_stream(3.0),
+    })
+    fc = LoadForecaster(
+        LoadForecasterConfig(
+            entity_id="sensor.load_w",
+            ev_power_entity_id="sensor.ev_w",
+        ),
+        reader,
+    )
+    out = fc.forecast(_slots(4))
+    for s in _slots(4):
+        assert out.kw_per_slot[s] == pytest.approx(5.0)
+        assert out.days_used_per_slot[s] == 7
+    assert out.ev_subtracted is True

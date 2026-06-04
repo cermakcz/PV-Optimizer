@@ -71,11 +71,20 @@ class LoadForecaster:
         # planning cycle.
         self.last_forecast: LoadForecast | None = None
 
-    def forecast(self, slot_starts: list[datetime]) -> LoadForecast:
+    def forecast(
+        self,
+        slot_starts: list[datetime],
+        *,
+        subtract_ev: bool = True,
+    ) -> LoadForecast:
         """Build a forecast for the given slot starts (naive UTC, ascending).
 
         Returns 0.0 (with ``days_used = 0``) for any slot with no usable
         history; the planner can still proceed with a degraded forecast.
+
+        When ``subtract_ev=True`` and ``config.ev_power_entity_id`` is set,
+        the per-bucket EV average is subtracted from the per-bucket load
+        average before taking the median, with a bucket-level clamp at 0.
         """
         if not slot_starts:
             return LoadForecast(kw_per_slot={}, days_used_per_slot={})
@@ -86,6 +95,12 @@ class LoadForecaster:
         latest = max(slot_starts) + timedelta(minutes=cfg.slot_minutes)
         samples = self.reader.get_history(cfg.entity_id, earliest_lookback, latest)
 
+        ev_active = subtract_ev and cfg.ev_power_entity_id is not None
+        ev_samples: list[tuple[datetime, float]] = []
+        if ev_active:
+            ev_samples = self.reader.get_history(
+                cfg.ev_power_entity_id, earliest_lookback, latest)
+
         kw_out: dict[datetime, float] = {}
         used_out: dict[datetime, int] = {}
         for slot_start in slot_starts:
@@ -95,9 +110,14 @@ class LoadForecaster:
                 if cfg.weekday_aware and hist_start.weekday() != slot_start.weekday():
                     continue
                 hist_end = hist_start + timedelta(minutes=cfg.slot_minutes)
-                avg = _bucket_average_kw(samples, hist_start, hist_end)
-                if avg is not None:
-                    day_avgs.append(avg)
+                load_avg = _bucket_average_kw(samples, hist_start, hist_end)
+                if load_avg is None:
+                    continue
+                if ev_active:
+                    ev_avg = _bucket_average_kw(ev_samples, hist_start, hist_end) or 0.0
+                    day_avgs.append(max(0.0, load_avg - ev_avg))
+                else:
+                    day_avgs.append(load_avg)
             if day_avgs:
                 v = statistics.median(day_avgs)
                 if cfg.cap_kw is not None:
@@ -108,10 +128,14 @@ class LoadForecaster:
                 kw_out[slot_start] = 0.0
                 used_out[slot_start] = 0
         _LOGGER.debug(
-            "load forecast: %d slots, lookback=%d, weekday_aware=%s, slot_h=%s",
-            len(slot_starts), cfg.lookback_days, cfg.weekday_aware, slot_h,
+            "load forecast: %d slots, lookback=%d, weekday_aware=%s, slot_h=%s, ev_subtracted=%s",
+            len(slot_starts), cfg.lookback_days, cfg.weekday_aware, slot_h, ev_active,
         )
-        result = LoadForecast(kw_per_slot=kw_out, days_used_per_slot=used_out)
+        result = LoadForecast(
+            kw_per_slot=kw_out,
+            days_used_per_slot=used_out,
+            ev_subtracted=ev_active,
+        )
         self.last_forecast = result
         return result
 
