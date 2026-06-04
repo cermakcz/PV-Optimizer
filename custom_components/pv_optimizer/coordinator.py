@@ -263,6 +263,11 @@ class PvOptimizerCoordinator(DataUpdateCoordinator[PlanCycle]):
                     cap_kw=opts.cap_kw,
                     weekday_aware=opts.weekday_aware,
                     slot_minutes=config.slot_minutes,
+                    ev_power_entity_id=(
+                        config.ev.charging_power_entity
+                        if config.ev is not None
+                        else None
+                    ),
                 ),
                 _HassStatsHistoryReader(hass, stats_period),
             )
