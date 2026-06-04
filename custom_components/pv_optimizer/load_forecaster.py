@@ -4,8 +4,12 @@ Pure layer (no Home Assistant dependency). The HA coordinator supplies a
 ``HistoryReader`` implementation backed by the ``recorder`` component;
 unit tests use a synthetic reader.
 
-The median naturally rejects one-off spikes (e.g. an EV charging session
-on a single day) without needing to know what a "spike" looks like.
+The median rejects a one-off spike on a single day. When the EV charges
+on ≥ 4 of the lookback days at the same hour, that bias survives — so
+the forecaster optionally subtracts the per-bucket EV-power average
+from the per-bucket load average before taking the median. See
+``LoadForecasterConfig.ev_power_entity_id`` and
+``LoadForecaster.forecast(subtract_ev=...)``.
 """
 from __future__ import annotations
 

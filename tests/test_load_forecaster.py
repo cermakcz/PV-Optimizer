@@ -37,43 +37,6 @@ class FakeHistory:
         return carry + in_win
 
 
-def _constant_history(value_kw: float, days: int = 10,
-                      step_minutes: int = 15) -> FakeHistory:
-    base = NOW - timedelta(days=days)
-    samples = []
-    cursor = base
-    end = NOW + timedelta(hours=24)
-    while cursor < end:
-        samples.append((cursor, value_kw))
-        cursor += timedelta(minutes=step_minutes)
-    return FakeHistory(samples)
-
-
-class _MultiHistory:
-    """Per-entity step-wise history with carry-forward.
-
-    Mirrors FakeHistory's contract but dispatches by entity_id so a single
-    reader can return distinct streams for the load and EV power entities.
-    """
-
-    def __init__(self, by_entity: dict[str, list[tuple[datetime, float]]]) -> None:
-        self._by_entity = {
-            k: sorted(v, key=lambda s: s[0]) for k, v in by_entity.items()
-        }
-
-    def get_history(self, entity_id: str, start: datetime, end: datetime
-                    ) -> list[tuple[datetime, float]]:
-        samples = self._by_entity.get(entity_id, [])
-        carry: list[tuple[datetime, float]] = []
-        in_win: list[tuple[datetime, float]] = []
-        for ts, v in samples:
-            if ts <= start:
-                carry = [(ts, v)]
-            elif ts < end:
-                in_win.append((ts, v))
-        return carry + in_win
-
-
 def _constant_stream(value_kw: float, days: int = 10,
                      step_minutes: int = 15) -> list[tuple[datetime, float]]:
     """Build a constant-value sample stream covering [NOW - days, NOW + 1d)."""
@@ -85,6 +48,28 @@ def _constant_stream(value_kw: float, days: int = 10,
         samples.append((cursor, value_kw))
         cursor += timedelta(minutes=step_minutes)
     return samples
+
+
+def _constant_history(value_kw: float, days: int = 10,
+                      step_minutes: int = 15) -> FakeHistory:
+    return FakeHistory(_constant_stream(value_kw, days, step_minutes))
+
+
+class _MultiHistory:
+    """Per-entity step-wise history with carry-forward.
+
+    Dispatches by entity_id to per-entity FakeHistory instances so a
+    single reader can return distinct streams for the load and EV power
+    entities. Carry-forward semantics are inherited from FakeHistory.
+    """
+
+    def __init__(self, by_entity: dict[str, list[tuple[datetime, float]]]) -> None:
+        self._by_entity = {k: FakeHistory(v) for k, v in by_entity.items()}
+
+    def get_history(self, entity_id: str, start: datetime, end: datetime
+                    ) -> list[tuple[datetime, float]]:
+        h = self._by_entity.get(entity_id)
+        return h.get_history(entity_id, start, end) if h is not None else []
 
 
 # ---------------------------------------------------------------------------
