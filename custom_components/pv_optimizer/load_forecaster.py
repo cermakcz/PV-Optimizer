@@ -42,6 +42,7 @@ class LoadForecasterConfig:
     cap_kw: float | None = None
     weekday_aware: bool = False
     slot_minutes: int = 60
+    ev_power_entity_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.lookback_days <= 0:
@@ -58,6 +59,7 @@ class LoadForecast:
 
     kw_per_slot: dict[datetime, float]
     days_used_per_slot: dict[datetime, int] = field(default_factory=dict)
+    ev_subtracted: bool = False
 
 
 class LoadForecaster:
