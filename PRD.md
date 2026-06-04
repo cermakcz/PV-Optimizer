@@ -125,6 +125,14 @@ for any of the lookback days), the planner falls back to the current
 load-power reading for that slot — same behavior as if no forecaster were
 present at all.
 
+**EV correction.** When an EV is configured (see EV-charging spec), the
+forecaster also reads the EV charging-power entity's history and subtracts
+the per-bucket EV average from the per-bucket load average before taking
+the median (bucket-level clamp at 0). The subtraction is gated on the
+*current* EV mode being `auto` — the only mode in which the LP also
+budgets `p_ev_chg` separately. In `car`/`off` the EV is treated as
+opaque household load and historical draws are included.
+
 ## 5. Outputs (controlled HA entities, configurable)
 | Output | Type | Semantics |
 |---|---|---|
@@ -390,6 +398,8 @@ predicate so the displayed physical SoC stays flat.
   - `horizon_slots`, `status`, `solve_time_s`, `error`: solver diagnostics.
 - `sensor.pv_optimizer_load_forecast` (next-slot kW; full per-slot series in
   attributes). Only published when the built-in forecaster is active.
+  Attributes include `ev_subtracted: bool` indicating whether the most
+  recent cycle had the EV-history correction (§4.2) applied.
 
 ## 10. Testing Strategy
 - `optimizer.py` covered by deterministic unit tests with hand-designed
