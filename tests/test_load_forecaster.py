@@ -220,3 +220,21 @@ def test_ev_subtraction_full_history() -> None:
         assert out.kw_per_slot[s] == pytest.approx(5.0)
         assert out.days_used_per_slot[s] == 7
     assert out.ev_subtracted is True
+
+
+def test_ev_subtraction_clamps_at_zero() -> None:
+    """EV draw > measured load → bucket-level clamp keeps median ≥ 0."""
+    reader = _MultiHistory({
+        "sensor.load_w": _constant_stream(2.0),
+        "sensor.ev_w": _constant_stream(3.0),
+    })
+    fc = LoadForecaster(
+        LoadForecasterConfig(
+            entity_id="sensor.load_w",
+            ev_power_entity_id="sensor.ev_w",
+        ),
+        reader,
+    )
+    out = fc.forecast(_slots(2))
+    for s in _slots(2):
+        assert out.kw_per_slot[s] == pytest.approx(0.0)
