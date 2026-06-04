@@ -298,3 +298,26 @@ def test_ev_subtraction_disabled_per_call() -> None:
     for s in _slots(2):
         assert out.kw_per_slot[s] == pytest.approx(8.0)
     assert out.ev_subtracted is False
+
+
+def test_ev_subtraction_independent_cadences() -> None:
+    """Load samples every 30 s vs EV samples every 5 min — both still average
+    correctly per bucket because subtraction happens on bucket averages, not
+    on aligned per-sample pairs.
+    """
+    load_stream = _constant_stream(8.0, step_minutes=0.5)
+    ev_stream = _constant_stream(3.0, step_minutes=5)
+    reader = _MultiHistory({
+        "sensor.load_w": load_stream,
+        "sensor.ev_w": ev_stream,
+    })
+    fc = LoadForecaster(
+        LoadForecasterConfig(
+            entity_id="sensor.load_w",
+            ev_power_entity_id="sensor.ev_w",
+        ),
+        reader,
+    )
+    out = fc.forecast(_slots(2))
+    for s in _slots(2):
+        assert out.kw_per_slot[s] == pytest.approx(5.0)
