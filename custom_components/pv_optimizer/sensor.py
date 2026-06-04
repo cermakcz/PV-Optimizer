@@ -187,6 +187,7 @@ class _LoadForecastSensor(_Base):
             "weekday_aware": fc.config.weekday_aware,
             "kw_per_slot": {naive_utc_to_iso(k): round(v, 3) for k, v in kw.items()},
             "days_used_per_slot": {naive_utc_to_iso(k): used.get(k, 0) for k in kw},
+            "ev_subtracted": fc.last_forecast.ev_subtracted,
         }
 
 
