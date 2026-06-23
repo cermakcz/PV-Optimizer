@@ -1990,3 +1990,54 @@ def test_planner_forecaster_subtract_ev_gated_on_auto_mode() -> None:
         assert spy.calls[-1] is expected, (
             f"mode={mode} expected subtract_ev={expected}, got {spy.calls[-1]}"
         )
+
+
+def test_ev_replan_trigger_entities_full_set() -> None:
+    from custom_components.pv_optimizer.planner import (
+        EVConfig, ev_replan_trigger_entities,
+    )
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        target_pct_entity="number.pv_optimizer_ev_target_pct",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+        planned_start_entity="datetime.pv_optimizer_ev_planned_start",
+    )
+    assert ev_replan_trigger_entities(ev_cfg) == [
+        "sensor.ev_state",
+        "number.pv_optimizer_ev_target_kwh",
+        "number.pv_optimizer_ev_target_pct",
+        "datetime.pv_optimizer_ev_deadline",
+        "datetime.pv_optimizer_ev_planned_start",
+        "select.pv_optimizer_ev_mode",
+    ]
+
+
+def test_ev_replan_trigger_entities_filters_empty() -> None:
+    """The integration-created ids default to '' on EVConfig; drop them.
+
+    The charging-power entity is deliberately NOT watched (its wattage
+    fluctuates during normal charging and would trigger needless solves).
+    """
+    from custom_components.pv_optimizer.planner import (
+        EVConfig, ev_replan_trigger_entities,
+    )
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=8.0, max_charging_current_a=20.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+    )
+    result = ev_replan_trigger_entities(ev_cfg)
+    assert result == ["sensor.ev_state"]
+    assert "sensor.ev_power" not in result

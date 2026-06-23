@@ -137,6 +137,28 @@ class EVConfig:
     car_auto_return_entity: str = ""
 
 
+def ev_replan_trigger_entities(ev: EVConfig) -> list[str]:
+    """Entity ids whose state changes should trigger an immediate re-plan.
+
+    Watches the charger *connection state* and the user-facing EV inputs
+    (target kWh/%, deadline, planned start, mode). The charging-*power*
+    entity is intentionally excluded: its wattage fluctuates throughout a
+    charging session and would trigger needless (CPU-bound) LP solves.
+
+    Empty ids are filtered out so a never-configured optional input never
+    subscribes to ``""``. Order is stable for deterministic tests.
+    """
+    candidates = [
+        ev.charger_state_entity,
+        ev.target_kwh_entity,
+        ev.target_pct_entity,
+        ev.deadline_entity,
+        ev.planned_start_entity,
+        ev.mode_entity,
+    ]
+    return [e for e in candidates if e]
+
+
 @dataclass(frozen=True)
 class PlannerConfig:
     # Inputs (entity IDs).
