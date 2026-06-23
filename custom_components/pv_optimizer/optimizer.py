@@ -77,8 +77,10 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
 
     p_buy = [pulp.LpVariable(f"buy_{t}", lowBound=0, upBound=inputs.p_grid_imp_max_kw) for t in range(n)]
     p_sell, p_chg, p_dis, p_curt, soc = [], [], [], [], []
+    sell_ub_t: list[float] = []
     for t in range(n):
         sell_ub = inputs.p_grid_exp_max_kw if inputs.slots[t].feedin_allowed else 0.0
+        sell_ub_t.append(sell_ub)
         p_sell.append(pulp.LpVariable(f"sell_{t}", lowBound=0, upBound=sell_ub))
         p_chg.append(pulp.LpVariable(f"chg_{t}", lowBound=0, upBound=bat.p_chg_max_kw))
         p_dis.append(pulp.LpVariable(f"dis_{t}", lowBound=0, upBound=bat.p_dis_max_kw))
@@ -105,6 +107,19 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
     else:
         p_ev = [0.0] * n  # constant zeros; PuLP handles mixed-numeric expressions
 
+    # Grid import/export mutual exclusion. A single net-metered connection
+    # exchanges one net power with the grid, so importing and exporting in
+    # the same slot is unphysical. Without forbidding it the LP fabricates a
+    # round-trip whenever ``price_sell >= price_buy`` (e.g. an evening price
+    # spike): import N kW and re-export it at the feed-in cap to bank the
+    # spread, pinning ``p_sell`` to the export limit and corrupting the
+    # derived inverter set-point. One binary per slot (``export_on``) gates
+    # the two legs via big-M; the big-Ms are the variables' own upper
+    # bounds, so the constraints add no slack beyond what already bounded
+    # them. Slots with ``sell_ub == 0`` already pin ``p_sell == 0``, so the
+    # solver is free to pick ``export_on = 0`` and import normally.
+    export_on = [pulp.LpVariable(f"export_on_{t}", cat="Binary") for t in range(n)]
+
     # Initial SoC
     prob += soc[0] == inputs.initial_soc_kwh, "soc_init"
 
@@ -115,6 +130,11 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
             inputs.pv_kw[t] + p_dis[t] + p_buy[t]
             == inputs.load_kw[t] + p_ev[t] + p_chg[t] + p_sell[t] + p_curt[t]
         ), f"balance_{t}"
+        # Mutual exclusion: export only when export_on, import only otherwise.
+        prob += p_sell[t] <= sell_ub_t[t] * export_on[t], f"export_gate_{t}"
+        prob += (
+            p_buy[t] <= inputs.p_grid_imp_max_kw * (1 - export_on[t])
+        ), f"import_gate_{t}"
         # SoC dynamics
         next_soc = soc[t + 1] if t + 1 < n else soc_end
         prob += (
@@ -179,6 +199,13 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
     # and co-discharging in the same slot when round-trip efficiency is 1.
     eps_curt = 1e-4
     eps_cycle = 1e-5
+    # Among equal-cost EV schedules (the battery can shuttle energy between
+    # in-window slots, so the slot choice is otherwise degenerate) prefer
+    # charging earlier. A per-slot-index tilt this small never overrides a
+    # real price difference, but it makes the plan deterministic across
+    # solvers and biases the charge toward the soonest slot — a safer hedge
+    # against forecast error and tightening deadlines.
+    eps_ev_early = 1e-6
     cost_terms = []
     for t in range(n):
         s = inputs.slots[t]
@@ -191,6 +218,8 @@ def solve(inputs: OptimizerInputs) -> OptimizerResult:
                 + eps_cycle * (p_chg[t] + p_dis[t])
             )
         )
+        if ev_active:
+            cost_terms.append(eps_ev_early * t * p_ev[t])
         if health_active:
             cost_terms.append(
                 dt[t] * bat.low_soc_penalty_per_kwh_h * deficit[t]

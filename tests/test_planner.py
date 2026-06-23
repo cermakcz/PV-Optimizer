@@ -1279,8 +1279,11 @@ def test_planner_planned_start_pre_schedules_window_in_auto() -> None:
     )
     # Slot 0 is cheapest but must NOT be used (before planned_start).
     # planned_start at +2h => slot index 2 (slot_minutes=60, NOW=noon).
-    # The LP should pick slot 2 (next cheapest in-window) over later
-    # expensive slots.
+    # The exact in-window slot the LP picks is left to the optimiser: when
+    # the sell price sits above the buy price the battery competes with the
+    # EV for the import/export slots (a slot can do one or the other, not
+    # both), so the cost-optimal charge slot is not simply "cheapest buy".
+    # The contract under test is the gate, not the slot.
     buy = [0.05] * 24
     buy[2] = 0.06  # only-slightly-more-expensive in-window
     buy[3] = 0.30  # discourage spill
@@ -1300,11 +1303,17 @@ def test_planner_planned_start_pre_schedules_window_in_auto() -> None:
     p = Planner(_config(ev=ev_cfg), FakeReader(states), FakeCaller())
     cycle = p.step(NOW)
     assert cycle.result is not None
-    # Slots before planned_start: no EV.
-    assert cycle.result.slots[0].p_ev_chg_kw == 0
-    assert cycle.result.slots[1].p_ev_chg_kw == 0
-    # At or after planned_start: LP plans charging.
-    assert cycle.result.slots[2].p_ev_chg_kw > 0
+    slots = cycle.result.slots
+    # Gate: no EV charging before planned_start (slots 0 and 1).
+    assert slots[0].p_ev_chg_kw == 0
+    assert slots[1].p_ev_chg_kw == 0
+    # The gate does not strand the schedule: the full 5 kWh target is met
+    # from planned_start (slot 2) onward, within the deadline window.
+    in_window = sum(sp.p_ev_chg_kw * sp.duration_h for sp in slots[2:])
+    assert in_window == pytest.approx(5.0, abs=1e-3)
+    # And no slot fabricates a grid round-trip (import and export at once).
+    for sp in slots:
+        assert not (sp.p_buy_kw > 1e-6 and sp.p_sell_kw > 1e-6)
     # Hardware untouched while the gate is active.
     ev_writes = [c for c in p.caller.calls if c[2].get("entity_id") in (
         "number.ev_max_current", "switch.ev_start", "select.ev_mode")]

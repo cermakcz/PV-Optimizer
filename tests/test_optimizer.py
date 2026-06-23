@@ -139,6 +139,98 @@ def test_high_cycle_cost_kills_arbitrage() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Grid import/export mutual exclusion. A single net-metered connection
+# cannot import and export at the same instant, so the LP must never plan
+# both legs in one slot. Without this, a sell price above the buy price
+# lets the LP fabricate a grid round-trip (buy N, resell at the export cap)
+# to harvest a spread that does not physically exist.
+# ---------------------------------------------------------------------------
+
+
+def test_no_simultaneous_grid_import_and_export() -> None:
+    # Sell strictly above buy, and the battery cannot source any export
+    # (no PV, charge/discharge disabled). The only way to "export" is the
+    # fictional grid round-trip. The plan must refuse it: each slot serves
+    # its load via import only, with zero export.
+    bat = _battery(p_chg_max_kw=0.0, p_dis_max_kw=0.0)
+    slots = _slots([0.10] * 3, [0.30] * 3)  # buy 0.10, sell 0.30
+    inp = OptimizerInputs(slots, [0.0] * 3, [1.0] * 3, 5.0, bat,
+                          p_grid_imp_max_kw=10.0, p_grid_exp_max_kw=5.0)
+    r = solve(inp)
+    assert r.status == "Optimal"
+    for i, sp in enumerate(r.slots):
+        assert not (sp.p_buy_kw > 1e-6 and sp.p_sell_kw > 1e-6), (
+            f"slot {i} imports {sp.p_buy_kw:.3f} kW and exports "
+            f"{sp.p_sell_kw:.3f} kW simultaneously"
+        )
+    # Only the genuine load is imported; nothing is exported.
+    for sp in r.slots:
+        assert sp.p_sell_kw == pytest.approx(0.0, abs=1e-6)
+        assert sp.p_buy_kw == pytest.approx(1.0, abs=1e-6)
+
+
+def test_ev_charges_at_lower_buy_price_when_no_arbitrage_competes() -> None:
+    # A genuine (non-degenerate) EV decision: cheap slot 0, expensive
+    # slots 1-3, sell price below buy everywhere so the battery has no
+    # grid-arbitrage incentive to compete for slot 0. The LP must charge
+    # the EV in the cheap slot. (Battery disabled to isolate the EV leg.)
+    from custom_components.pv_optimizer.models import EVParams
+    bat = _battery(p_chg_max_kw=0.0, p_dis_max_kw=0.0)
+    slots = _slots([0.05] + [0.30] * 3, [0.0] * 4)  # no feed-in revenue
+    ev = EVParams(max_charging_power_kw=8.0, max_charging_current_a=20.0,
+                  min_charging_current_a=6.0, car_battery_kwh=60.0)
+    inp = OptimizerInputs(slots, [0.0] * 4, [0.0] * 4, 5.0, bat, 10, 10,
+                          ev=ev, ev_target_kwh=4.0, ev_start_index=0,
+                          ev_deadline_index=4)
+    r = solve(inp)
+    assert r.status == "Optimal"
+    assert r.slots[0].p_ev_chg_kw == pytest.approx(4.0, abs=1e-3)
+
+
+def test_sell_above_buy_does_not_pin_export_to_cap() -> None:
+    # The reported regression: a sell-price spike sitting above a flat buy
+    # price. With no battery/PV source, every such slot would otherwise
+    # round-trip the grid and pin p_sell to the export cap. After the fix
+    # the export cap is never reached and nothing is exported.
+    bat = _battery(p_chg_max_kw=0.0, p_dis_max_kw=0.0)
+    sell = [0.20, 0.40, 0.45, 0.30, 0.15]   # spike in the middle
+    buy = [0.25] * 5                          # flat, below the spike
+    slots = _slots(buy, sell)
+    inp = OptimizerInputs(slots, [0.0] * 5, [0.5] * 5, 5.0, bat,
+                          p_grid_imp_max_kw=10.0, p_grid_exp_max_kw=13.0)
+    r = solve(inp)
+    assert r.status == "Optimal"
+    for sp in r.slots:
+        assert sp.p_sell_kw == pytest.approx(0.0, abs=1e-6)
+        assert sp.p_buy_kw == pytest.approx(0.5, abs=1e-6)  # just the load
+
+
+def test_battery_exports_into_the_highest_price_slot() -> None:
+    # Battery is the only export source (PV-free, load-free). It holds
+    # 5 kWh of deliverable energy and the discharge/export caps each allow
+    # 5 kW, so the whole charge fits in one slot. The LP must spend it in
+    # the highest sell-price slot, not an earlier, cheaper one -- and must
+    # not fabricate a grid round-trip in the other above-buy slots.
+    bat = _battery(soc_min_kwh=1.0, soc_max_kwh=6.0, p_dis_max_kw=5.0,
+                   p_chg_max_kw=0.0)
+    sell = [0.30, 0.90, 0.50]   # peak in slot 1
+    buy = [0.20] * 3            # flat, below every sell price
+    slots = _slots(buy, sell)
+    inp = OptimizerInputs(slots, [0.0] * 3, [0.0] * 3, 6.0, bat,
+                          p_grid_imp_max_kw=10.0, p_grid_exp_max_kw=5.0,
+                          terminal_soc_kwh=1.0)
+    r = solve(inp)
+    assert r.status == "Optimal"
+    # No fabricated round-trips anywhere.
+    for sp in r.slots:
+        assert not (sp.p_buy_kw > 1e-6 and sp.p_sell_kw > 1e-6)
+    # All 5 kWh exported in the peak slot; the cheaper slots export nothing.
+    assert r.slots[1].p_sell_kw == pytest.approx(5.0, abs=1e-4)
+    assert r.slots[0].p_sell_kw == pytest.approx(0.0, abs=1e-4)
+    assert r.slots[2].p_sell_kw == pytest.approx(0.0, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
 # Limits, terminal SoC, infeasibility
 # ---------------------------------------------------------------------------
 
