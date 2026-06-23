@@ -16,9 +16,11 @@ __all__ = ["DOMAIN", "PLATFORMS", "async_setup_entry", "async_unload_entry"]
 async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
     """Set up pv_optimizer from a config entry (HA path)."""
     # Imports deferred so this module is import-safe without homeassistant.
+    from homeassistant.core import callback
+    from homeassistant.helpers.event import async_track_state_change_event
     from .coordinator import LoadForecasterOptions, PvOptimizerCoordinator
     from .models import BatteryParams, EVParams
-    from .planner import EVConfig, PlannerConfig
+    from .planner import EVConfig, PlannerConfig, ev_replan_trigger_entities
     from . import const as C
 
     data = {**entry.data, **entry.options}
@@ -135,6 +137,24 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
     await coord.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Re-plan immediately when a relevant EV entity changes (e.g. plugging in
+    # the car, or editing the target/deadline/planned-start/mode) instead of
+    # waiting up to a full coordinator cycle. async_request_refresh() is
+    # debounced by HA, so the first change fires at once and rapid follow-up
+    # bounces coalesce into a single solve. async_on_unload detaches the
+    # listener on reload/unload (mirrors the options-reload listener below).
+    if ev_cfg is not None:
+        ev_trigger_entities = ev_replan_trigger_entities(ev_cfg)
+
+        @callback
+        def _ev_changed(event):
+            hass.async_create_task(coord.async_request_refresh())
+
+        if ev_trigger_entities:
+            entry.async_on_unload(
+                async_track_state_change_event(
+                    hass, ev_trigger_entities, _ev_changed)
+            )
     # Reload the entry whenever the user saves the Options form, so changes
     # to entity bindings / battery params / solver knobs take effect without
     # an HA restart. ``async_on_unload`` ensures the listener is detached on
