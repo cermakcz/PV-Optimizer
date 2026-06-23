@@ -144,6 +144,9 @@ def ev_replan_trigger_entities(ev: EVConfig) -> list[str]:
     (target kWh/%, deadline, planned start, mode). The charging-*power*
     entity is intentionally excluded: its wattage fluctuates throughout a
     charging session and would trigger needless (CPU-bound) LP solves.
+    ``car_auto_return_entity`` is also intentionally excluded: toggling it
+    only affects the non-time-critical session-done auto-return path, which
+    is adequately handled by the periodic planning cycle.
 
     Empty ids are filtered out so a never-configured optional input never
     subscribes to ``""``. Order is stable for deterministic tests.
