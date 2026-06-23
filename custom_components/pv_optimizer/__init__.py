@@ -145,12 +145,11 @@ async def async_setup_entry(hass, entry):  # type: ignore[no-untyped-def]
     # listener on reload/unload (mirrors the options-reload listener below).
     if ev_cfg is not None:
         ev_trigger_entities = ev_replan_trigger_entities(ev_cfg)
-
-        @callback
-        def _ev_changed(event):
-            hass.async_create_task(coord.async_request_refresh())
-
         if ev_trigger_entities:
+            @callback
+            def _ev_changed(_event):
+                hass.async_create_task(coord.async_request_refresh())
+
             entry.async_on_unload(
                 async_track_state_change_event(
                     hass, ev_trigger_entities, _ev_changed)
