@@ -421,8 +421,9 @@ class Planner:
             # the car will be plugged in by then, regardless of current
             # physical state, and reserve the LP window from that slot on.
             # This lets the user pre-schedule a charging block before
-            # arriving home. ``_apply_ev`` keeps a parallel gate so the
-            # EVCS isn't physically poked until the time rolls in.
+            # arriving home. ``_apply_ev`` keeps a parallel gate: it won't
+            # drive active charging before the time, but does hand the EVCS
+            # to its own surplus/solar mode so free PV charges meanwhile.
             planned_start = self._read_datetime_optional(
                 cfg.ev.planned_start_entity)
             if planned_start is not None and planned_start > now:
@@ -730,14 +731,22 @@ class Planner:
             return
         mode = self._read_mode()  # "auto" / "car" / "off"
         self.ev_state.last_mode = mode
-        # Future-planned-start gate: in auto mode, suppress all EV writes
-        # (LP plan, reactive cheap-grid path, mode/current/start) until
-        # the scheduled start time rolls past. Car mode explicitly
-        # overrides — user intent beats schedule.
+        # Future-planned-start gate: in auto mode, the planner does not drive
+        # any active (grid-import) charging before the scheduled start — that
+        # stays the LP's job from planned_start on. But instead of leaving the
+        # charger untouched, hand it to its own surplus/solar logic (passive
+        # "Auto" mode + max-current ceiling + start ON) so free PV still
+        # charges the car during the pre-start window. Any early surplus
+        # self-corrects: it raises measured session energy, so the next
+        # re-plan reserves less remaining_kwh. Car mode explicitly overrides —
+        # user intent beats schedule.
         if mode == "auto":
             planned_start = self._read_datetime_optional(
                 cfg.planned_start_entity)
             if planned_start is not None and planned_start > now:
+                self._write_ev_charger_mode_passive()
+                self._write_ev_current(cfg.params.max_charging_current_a)
+                self._write_ev_start(True)
                 return
         if mode == "off":
             return
