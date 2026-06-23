@@ -421,9 +421,10 @@ class Planner:
             # the car will be plugged in by then, regardless of current
             # physical state, and reserve the LP window from that slot on.
             # This lets the user pre-schedule a charging block before
-            # arriving home. ``_apply_ev`` keeps a parallel gate: it won't
-            # drive active charging before the time, but does hand the EVCS
-            # to its own surplus/solar mode so free PV charges meanwhile.
+            # arriving home. ``_apply_ev`` keeps a parallel gate: it drives no
+            # charging before the time (not even from free PV surplus) and just
+            # parks the EVCS idle in passive "Auto" mode until the time rolls
+            # in.
             planned_start = self._read_datetime_optional(
                 cfg.ev.planned_start_entity)
             if planned_start is not None and planned_start > now:
@@ -731,22 +732,23 @@ class Planner:
             return
         mode = self._read_mode()  # "auto" / "car" / "off"
         self.ev_state.last_mode = mode
-        # Future-planned-start gate: in auto mode, the planner does not drive
-        # any active (grid-import) charging before the scheduled start — that
-        # stays the LP's job from planned_start on. But instead of leaving the
-        # charger untouched, hand it to its own surplus/solar logic (passive
-        # "Auto" mode + max-current ceiling + start ON) so free PV still
-        # charges the car during the pre-start window. Any early surplus
-        # self-corrects: it raises measured session energy, so the next
-        # re-plan reserves less remaining_kwh. Car mode explicitly overrides —
-        # user intent beats schedule.
+        # Future-planned-start gate: in auto mode, the planner drives no
+        # charging at all before the scheduled start — that stays the LP's job
+        # from planned_start on. We do not even soak up free PV surplus early:
+        # a user who set a future start may have done so deliberately (cheap or
+        # even negative grid prices later), so topping the car up from solar
+        # now could be the wrong trade. Still, don't leave the charger in
+        # whatever stale state it was in: hand it to passive "Auto" mode but
+        # keep it idle (start OFF), so it returns to a clean, not-charging
+        # state. Writing start OFF (rather than skipping the write) also
+        # self-corrects a stale ON from a prior session. Car mode explicitly
+        # overrides — user intent beats schedule.
         if mode == "auto":
             planned_start = self._read_datetime_optional(
                 cfg.planned_start_entity)
             if planned_start is not None and planned_start > now:
                 self._write_ev_charger_mode_passive()
-                self._write_ev_current(cfg.params.max_charging_current_a)
-                self._write_ev_start(True)
+                self._write_ev_start(False)
                 return
         if mode == "off":
             return
@@ -846,7 +848,11 @@ class Planner:
         if cfg.charger_mode_entity:
             # Mode-switching variant: cheap-grid drives the mode flip. When
             # not cheap, hand back to the EVCS (passive + max so its own
-            # surplus/solar logic decides).
+            # surplus/solar logic decides). Start is written ON in both
+            # branches: the EVCS can only surplus-charge with the start switch
+            # on, so leaving it untouched would strand a stale OFF (e.g. one
+            # left by the future-planned-start gate) and silently block
+            # surplus charging.
             if es.cheap_grid_active:
                 self._write_ev_charger_mode_active()
                 self._write_ev_current(cfg.params.max_charging_current_a)
@@ -854,6 +860,7 @@ class Planner:
             else:
                 self._write_ev_charger_mode_passive()
                 self._write_ev_current(cfg.params.max_charging_current_a)
+                self._write_ev_start(True)
         else:
             # No mode entity: decide_reactive owns everything.
             decision = decide_reactive(

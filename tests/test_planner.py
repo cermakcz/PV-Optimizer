@@ -1258,10 +1258,10 @@ def test_planner_engages_lp_when_target_and_deadline_set() -> None:
 def test_planner_planned_start_pre_schedules_window_in_auto() -> None:
     """When ``planned_start`` is in the future, the LP reserves a charging
     window from that slot onward (even with the car currently disconnected),
-    while ``_apply_ev`` hands the charger to its own surplus/solar logic
-    (passive mode + max-current ceiling + start ON) so free PV can still
-    charge before the scheduled block. The planner does not drive any
-    grid-import charging early — that stays the LP's job from planned_start.
+    while ``_apply_ev`` parks the charger idle in passive ("Auto") mode with
+    the start switch OFF. The planner drives no charging early — not even from
+    free PV surplus — since a future start may be deliberate (cheap/negative
+    prices later). Charging is the LP's job from planned_start on.
     """
     from custom_components.pv_optimizer.planner import EVConfig
     from custom_components.pv_optimizer.models import EVParams
@@ -1316,9 +1316,8 @@ def test_planner_planned_start_pre_schedules_window_in_auto() -> None:
     # And no slot fabricates a grid round-trip (import and export at once).
     for sp in slots:
         assert not (sp.p_buy_kw > 1e-6 and sp.p_sell_kw > 1e-6)
-    # Hardware: charger handed to its native surplus/solar mode during the
-    # gate (passive "Auto" + max-current ceiling + start ON), so free PV
-    # still charges. No active/"Manual" planner control before planned_start.
+    # Hardware: charger parked idle in passive "Auto" mode during the gate —
+    # start switch OFF (no surplus charging), and no current write at all.
     mode_writes = [c for c in p.caller.calls
                    if c[2].get("entity_id") == "select.ev_mode"]
     current_writes = [c for c in p.caller.calls
@@ -1327,15 +1326,15 @@ def test_planner_planned_start_pre_schedules_window_in_auto() -> None:
               if c[2].get("entity_id") == "switch.ev_start"]
     assert mode_writes and mode_writes[-1][2]["option"] == "Auto"
     assert all(c[2]["option"] == "Auto" for c in mode_writes)
-    assert current_writes and current_writes[-1][2]["value"] == 20
-    assert starts and starts[-1][1] == "turn_on"
+    assert current_writes == []
+    assert starts and all(c[1] == "turn_off" for c in starts)
 
 
-def test_planner_planned_start_hands_connected_car_to_passive_surplus() -> None:
+def test_planner_planned_start_parks_connected_car_idle() -> None:
     """With the car physically connected and idle while ``planned_start`` is
     still in the future, the gate must put the EVCS in passive ("Auto") mode
-    with the start switch ON so its own surplus/solar logic charges from free
-    PV. The planner must NOT engage active/"Manual" control before the time.
+    with the start switch OFF so it does not charge — not even from free PV
+    surplus. The planner must NOT engage any charging before the time.
     """
     from custom_components.pv_optimizer.planner import EVConfig
     from custom_components.pv_optimizer.models import EVParams
@@ -1376,8 +1375,8 @@ def test_planner_planned_start_hands_connected_car_to_passive_surplus() -> None:
               if c[2].get("entity_id") == "switch.ev_start"]
     assert mode_writes and mode_writes[-1][2]["option"] == "Auto"
     assert all(c[2]["option"] == "Auto" for c in mode_writes)
-    assert current_writes and current_writes[-1][2]["value"] == 20
-    assert starts and starts[-1][1] == "turn_on"
+    assert current_writes == []
+    assert starts and all(c[1] == "turn_off" for c in starts)
 
 
 def test_planner_planned_start_in_past_does_not_gate() -> None:
@@ -1895,6 +1894,12 @@ def test_planner_reactive_mode_switch_writes_correct_option_strings() -> None:
     mode_writes = [c for c in p.caller.calls
                    if c[2].get("entity_id") == "select.ev_mode"]
     assert mode_writes and mode_writes[-1][2]["option"] == "Auto"
+    # Passive branch must still arm the start switch ON — the EVCS can only
+    # surplus-charge with start on, so a stale OFF (e.g. from the planned-start
+    # gate) must not be left in place.
+    starts = [c for c in p.caller.calls
+              if c[2].get("entity_id") == "switch.ev_start"]
+    assert starts and starts[-1][1] == "turn_on"
     # Tick 2: cheap buy (0.0 ≤ 0.0) → cheap_grid_active → active branch → "Manual".
     states["sensor.buy"] = StateView(state="0.00",
                                      attributes={"today": [0.0] * 24})
