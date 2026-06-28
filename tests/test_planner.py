@@ -2173,3 +2173,90 @@ def test_write_ev_current_force_bypasses_tolerance() -> None:
     writes = [c for c in p.caller.calls
               if c[2].get("entity_id") == "number.ev_max_current"]
     assert writes and writes[-1][2]["value"] == 11
+
+
+# ---------------------------------------------------------------------------
+# Surplus-probe tests (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def _probe_ev_cfg():
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    return EVConfig(
+        params=EVParams(
+            max_charging_power_kw=7.2, max_charging_current_a=32.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0,
+            current_tolerance_a=1.0, buy_price_threshold=0.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+        start_switch_entity="switch.ev_start",
+        charger_mode_entity="select.ev_mode",
+        mode_entity="select.pv_optimizer_ev_mode",
+        target_kwh_entity="number.pv_optimizer_ev_target_kwh",
+        deadline_entity="datetime.pv_optimizer_ev_deadline",
+        planned_start_entity="datetime.pv_optimizer_ev_planned_start",
+    )
+
+
+def _probe_states():
+    # Battery full (soc_max is 9 kWh of 10 kWh capacity => 90 %), sunny
+    # forecast at slot 0, sell price below 0 so the LP never exports, no EV
+    # target so the LP plans no charge -> reactive branch.
+    pv_forecast = {
+        (NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): (4000.0 if h == 0 else 0.0)
+        for h in range(4)
+    }
+    states = _states(soc_pct=90.0, load_w=1000.0, sell=[-0.01] * 24,
+                     pv_forecast=pv_forecast)
+    states["sensor.ev_state"] = StateView(state="Connected")
+    states["sensor.ev_power"] = StateView(state="0")
+    states["number.ev_max_current"] = StateView(state="0")
+    states["switch.ev_start"] = StateView(state="off")
+    states["select.ev_mode"] = StateView(state="Manual")
+    states["select.pv_optimizer_ev_mode"] = StateView(state="auto")
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="0")
+    states["sensor.batt_w"] = StateView(state="0")  # battery idle
+    states["sensor.grid_w"] = StateView(state="0")
+    return states
+
+
+def test_probe_arms_and_drives_manual_in_reactive_branch() -> None:
+    states = _probe_states()
+    p = Planner(_config(ev=_probe_ev_cfg(), battery_power_entity="sensor.batt_w"),
+                FakeReader(states), FakeCaller())
+    p.step(NOW)
+    mode_writes = [c for c in p.caller.calls if c[2].get("entity_id") == "select.ev_mode"]
+    current_writes = [c for c in p.caller.calls if c[2].get("entity_id") == "number.ev_max_current"]
+    starts = [c for c in p.caller.calls if c[2].get("entity_id") == "switch.ev_start"]
+    assert mode_writes and mode_writes[-1][2]["option"] == "Manual"
+    assert current_writes and current_writes[-1][2]["value"] == 6  # kicked to min
+    assert starts and starts[-1][1] == "turn_on"
+    assert p.ev_state.probe_armed is True
+    assert p.ev_state.probe_current_a == 6
+
+
+def test_probe_disabled_without_battery_power_entity() -> None:
+    states = _probe_states()
+    p = Planner(_config(ev=_probe_ev_cfg()),  # no battery_power_entity
+                FakeReader(states), FakeCaller())
+    p.step(NOW)
+    mode_writes = [c for c in p.caller.calls if c[2].get("entity_id") == "select.ev_mode"]
+    # Falls back to the reactive passive handback (EVCS "Auto").
+    assert mode_writes and mode_writes[-1][2]["option"] == "Auto"
+    assert p.ev_state.probe_armed is False
+
+
+def test_probe_disarms_back_to_auto_when_exporting() -> None:
+    states = _probe_states()
+    states["sensor.sell"] = StateView(state="0.30", attributes={"today": [0.30] * 24})
+    p = Planner(_config(ev=_probe_ev_cfg(), battery_power_entity="sensor.batt_w"),
+                FakeReader(states), FakeCaller())
+    p.ev_state.probe_armed = True       # pretend we were probing
+    p.ev_state.probe_current_a = 12
+    p.step(NOW)
+    assert p.ev_state.probe_armed is False
+    assert p.ev_state.probe_current_a == 0
+    mode_writes = [c for c in p.caller.calls if c[2].get("entity_id") == "select.ev_mode"]
+    assert mode_writes and mode_writes[-1][2]["option"] == "Auto"

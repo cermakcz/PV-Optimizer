@@ -22,6 +22,8 @@ from .ev_controller import (
     decide_reactive,
     is_session_done,
     translate_lp_slot0,
+    should_probe_surplus,
+    decide_surplus_probe,
 )
 from .load_forecaster import LoadForecaster
 from .models import (
@@ -867,6 +869,8 @@ class Planner:
             self._write_ev_start(current > 0)
             return
         # Reactive path.
+        if self._run_surplus_probe(plan_first):
+            return
         es.cheap_grid_active = price_buy <= cfg.params.buy_price_threshold
         if cfg.charger_mode_entity:
             # Mode-switching variant: cheap-grid drives the mode flip. When
@@ -897,6 +901,57 @@ class Planner:
             self._write_ev_start(decision.max_current_a > 0)
 
     # ---- EV helpers -------------------------------------------------------
+
+    def _run_surplus_probe(self, plan_first) -> bool:
+        """If conditions warrant, take over surplus charging from the EVCS and
+        return True (writes Manual + regulated current + start). Otherwise reset
+        any probe state and return False so the caller's passive handback runs.
+        """
+        cfg = self.config.ev
+        es = self.ev_state
+        if cfg is None or es is None:
+            return False
+        batt = self._read_float_or_none(self.config.battery_power_entity)
+        grid = self._read_float_or_none(self.config.grid_power_entity)
+        soc_pct = self._read_float_or_none(self.config.battery_soc_entity)
+        state_class = classify_state(self._read_text(cfg.charger_state_entity))
+        soc_kwh = (soc_pct / 100.0 * self.config.battery.capacity_kwh
+                   if soc_pct is not None else 0.0)
+        forecast_surplus = self._cached_first_pv_kw - self._cached_first_load_kw
+        armed = should_probe_surplus(
+            currently_armed=es.probe_armed,
+            state_class=state_class,
+            p_ev_chg_kw=plan_first.p_ev_chg_kw,
+            p_sell_kw=plan_first.p_sell_kw,
+            soc_kwh=soc_kwh,
+            soc_max_kwh=self.config.battery.soc_max_kwh,
+            forecast_surplus_kw=forecast_surplus,
+            battery_power_available=batt is not None and soc_pct is not None,
+            grid_available=grid is not None,
+        )
+        if not armed:
+            if es.probe_armed:
+                es.probe_armed = False
+                es.probe_current_a = 0
+                es.probe_cycles_since_up = 0
+            return False
+        decision = decide_surplus_probe(
+            battery_discharge_w=max(0.0, -batt),
+            grid_import_w=max(0.0, grid),
+            forecast_surplus_kw=forecast_surplus,
+            current_a=es.probe_current_a,
+            cycles_since_up=es.probe_cycles_since_up,
+            ev=cfg.params,
+        )
+        # Mode first so any active/passive transition cache invalidation lands
+        # before the (forced) current write.
+        self._write_ev_charger_mode_active()
+        self._write_ev_current(decision.current_a, force=True)
+        self._write_ev_start(decision.current_a > 0)
+        es.probe_armed = True
+        es.probe_current_a = decision.current_a
+        es.probe_cycles_since_up = decision.cycles_since_up
+        return True
 
     def _read_mode(self) -> str:
         if not self.config.ev or not self.config.ev.mode_entity:
