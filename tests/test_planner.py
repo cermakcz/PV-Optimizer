@@ -2124,3 +2124,27 @@ def test_planner_config_accepts_battery_power_entity() -> None:
 
 def test_planner_config_battery_power_entity_defaults_none() -> None:
     assert _config().battery_power_entity is None
+
+
+def test_read_float_or_none_reads_and_handles_bad() -> None:
+    states = _states()
+    states["sensor.batt_w"] = StateView(state="-1500")
+    states["sensor.bad"] = StateView(state="unavailable")
+    p = Planner(_config(), FakeReader(states), FakeCaller())
+    assert p._read_float_or_none("sensor.batt_w") == -1500.0
+    assert p._read_float_or_none("sensor.bad") is None
+    assert p._read_float_or_none("sensor.missing") is None
+    assert p._read_float_or_none(None) is None
+
+
+def test_planner_caches_first_slot_pv_and_load() -> None:
+    # pv forecast 3 kW at slot 0, load ~1 kW -> cached surplus ~2 kW.
+    pv_forecast = {
+        (NOW + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00"): (3000.0 if h == 0 else 0.0)
+        for h in range(4)
+    }
+    states = _states(load_w=1000.0, pv_forecast=pv_forecast)
+    p = Planner(_config(), FakeReader(states), FakeCaller())
+    p.step(NOW)
+    assert p._cached_first_pv_kw == pytest.approx(3.0, abs=1e-6)
+    assert p._cached_first_load_kw == pytest.approx(1.0, abs=0.2)

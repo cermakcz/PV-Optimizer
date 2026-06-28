@@ -244,6 +244,8 @@ class Planner:
         )
         self._cached_first_buy_price: float = 0.0
         self._cached_ev_remaining_kwh: float = 0.0
+        self._cached_first_pv_kw: float = 0.0
+        self._cached_first_load_kw: float = 0.0
 
     # ---- public API ------------------------------------------------------
     def step(self, now: datetime) -> PlanCycle:
@@ -395,6 +397,8 @@ class Planner:
         )
 
         self._cached_first_buy_price = slots[0].price_buy
+        self._cached_first_pv_kw = pv_kw[0] if pv_kw else 0.0
+        self._cached_first_load_kw = load_kw[0] if load_kw else 0.0
 
         # EV inputs (only when an EV config exists, the user has set a
         # positive target, and a deadline lies inside the planning horizon).
@@ -602,6 +606,20 @@ class Planner:
             return float(st.state)
         except (TypeError, ValueError):
             return default
+
+    def _read_float_or_none(self, entity_id: str | None) -> float | None:
+        """Like ``_read_float_optional`` but returns ``None`` (not a default)
+        when the entity is unset, missing, or non-numeric — so callers can
+        fail-safe on a genuinely-absent reading."""
+        if not entity_id:
+            return None
+        st = self.reader.get(entity_id)
+        if st is None or st.state in _BAD_STATES:
+            return None
+        try:
+            return float(st.state)
+        except (TypeError, ValueError):
+            return None
 
     def _read_datetime_optional(self, entity_id: str | None
                                  ) -> datetime | None:
