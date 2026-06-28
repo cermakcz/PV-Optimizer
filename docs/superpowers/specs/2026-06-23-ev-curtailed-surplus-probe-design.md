@@ -28,15 +28,16 @@ own `pv_power_entity` is **also** blind here: a clipping inverter reports the
 *clipped* (consumed) production, not the *potential*, so `pv − load ≈ 0`. The
 surplus is potential energy that no sensor measures.
 
-This bites hardest in two no-LP-charge situations:
+This bites in the **handback / no-target** situation: the reactive branch hands
+the charger to the EVCS (`planner.py:846`), which is blind to the curtailed
+surplus.
 
-- **Handback / no target** — the reactive branch hands the charger to the EVCS
-  (`planner.py:846`), which is blind.
-- **Planned-start gate** — while `planned_start` is in the future the LP
-  reserves charging for *later* slots, so the *current* clipped slot's surplus
-  is wasted while the car sits idle (the gate path added in
-  `fix(ev): surplus-charge during future planned-start gate` hands to passive
-  "Auto", which is blind).
+The **planned-start gate** is deliberately *not* a target here. A user who sets
+a future `planned_start` may have done so on purpose (cheaper or negative grid
+prices later), so the gate intentionally keeps the charger idle until the start
+time rolls in (commit `fix(ev): don't surplus-charge before future
+planned-start`) — soaking solar early could be the wrong trade. The probe must
+not override that.
 
 ## Goal
 
@@ -89,7 +90,8 @@ Evaluated in `_apply_ev`, which runs last in `step()` (`planner.py:303`) and
 already receives `result.slots[0]` as `plan_first`. The probe arms when **all**
 hold:
 
-- `mode == "auto"` (and, for the gate, while `planned_start` is in the future).
+- `mode == "auto"`, and not inside the future-planned-start gate (the gate
+  returns earlier and stays idle by design).
 - `plan_first.p_ev_chg_kw <= eps` — the LP is **not** already charging the EV
   (if it is, the LP owns the charger; don't interfere).
 - `plan_first.p_sell_kw <= eps` — the LP is **not** exporting this slot. This is
@@ -189,7 +191,7 @@ initial values to validate empirically; they may later be derived from
 
 The probe disarms — the planner writes passive "Auto" to hand back to the EVCS
 and resets probe state — when any arm condition fails: export re-enabled,
-battery no longer full, car disconnected, or the gate window ends.
+battery no longer full, or car disconnected.
 
 No stickiness is applied to the export-re-enable transition. The sell price is
 hourly, so a crossing of the floor flips the charger Manual↔Auto at most about
@@ -216,8 +218,9 @@ logic, tested by `tests/test_ev_controller.py`):
   to arm.
 - New probe fields on `EVRuntimeState` (`planner.py`): commanded probe current,
   cycles-since-up counter, armed flag. Reset on disarm / disconnect.
-- `_apply_ev` wires both no-LP-charge paths (the planned-start gate and the
-  reactive branch) through the same arm-check + regulator, so they cannot drift.
+- `_apply_ev` wires the **reactive branch** (the no-LP-charge, not-exporting
+  handback path) through the arm-check + regulator. The planned-start gate is
+  left untouched — it returns earlier and stays idle by design.
 
 ### Tunable defaults (initial, to validate empirically)
 
@@ -251,6 +254,8 @@ export.
 
 - Charging from **sellable** (exportable) surplus — left to the EVCS Auto mode
   / the LP, per the asymmetric-split decision above.
+- The **planned-start gate** — it deliberately keeps the charger idle before
+  `planned_start`; the probe does not arm there.
 - Any LP/optimizer change. The probe is a reactive control layer only; the LP's
   modeling of targeted EV charging is unchanged.
 - Deriving battery flow from the PV/load/grid balance — we require an explicit
@@ -272,7 +277,7 @@ export.
   current + start on; does **not** arm when `p_sell > 0` (export enabled),
   battery not full, car disconnected, `battery_power_entity` missing, or a
   reading is bad; steps down when battery discharge is reported; and disarms
-  back to "Auto" when export re-enables. The planned-start gate test gains a
-  curtailment variant.
+  back to "Auto" when export re-enables. The existing planned-start gate tests
+  must remain green unchanged (the gate is not a probe target).
 - Existing planner/optimizer tests remain the coverage for LP-driven charging
   and the export-enabled handback (EVCS-follows-export) path.

@@ -4,7 +4,7 @@
 
 **Goal:** When the home battery is full and grid export is disabled (bad sell price), have the planner actively drive the EVCS to absorb otherwise-curtailed PV surplus that the charger's own export-following "Auto" mode cannot see.
 
-**Architecture:** A new opt-in reactive control layer. Two pure functions in `ev_controller.py` decide *whether* to take over (`should_probe_surplus`) and *how much current* to command (`decide_surplus_probe`, a stateful zero-import regulator). The planner wires them into the two no-LP-charge paths (planned-start gate + reactive branch). Overshoot is detected primarily via battery discharge (a full battery feeds the gap before the grid does), so the probe requires a new `battery_power_entity` and stays disabled (falling back to today's passive handback) when that entity is absent.
+**Architecture:** A new opt-in reactive control layer. Two pure functions in `ev_controller.py` decide *whether* to take over (`should_probe_surplus`) and *how much current* to command (`decide_surplus_probe`, a stateful zero-import regulator). The planner wires them into the reactive (no-LP-charge, not-exporting) handback branch only. The planned-start gate is intentionally excluded — it deliberately keeps the charger idle before `planned_start` (commit `fix(ev): don't surplus-charge before future planned-start`). Overshoot is detected primarily via battery discharge (a full battery feeds the gap before the grid does), so the probe requires a new `battery_power_entity` and stays disabled (falling back to today's passive handback) when that entity is absent.
 
 **Tech Stack:** Python 3.14, Home Assistant custom component, `pytest`. Pure logic lives in `ev_controller.py` (HA-free, tested by `tests/test_ev_controller.py`); planner wiring tested in `tests/test_planner.py` with `FakeReader`/`FakeCaller`.
 
@@ -19,7 +19,7 @@
 - `custom_components/pv_optimizer/const.py` — add `CONF_BATTERY_POWER`.
 - `custom_components/pv_optimizer/config_flow.py` — add an optional sensor selector for it.
 - `custom_components/pv_optimizer/__init__.py` — read it into `PlannerConfig`.
-- `custom_components/pv_optimizer/planner.py` — new `battery_power_entity` field on `PlannerConfig`; new probe fields on `EVRuntimeState`; `_read_float_or_none` helper; cache slot-0 PV/load; `force` param on `_write_ev_current`; `_run_surplus_probe` helper; wiring into the gate + reactive branches.
+- `custom_components/pv_optimizer/planner.py` — new `battery_power_entity` field on `PlannerConfig`; new probe fields on `EVRuntimeState`; `_read_float_or_none` helper; cache slot-0 PV/load; `force` param on `_write_ev_current`; `_run_surplus_probe` helper; wiring into the reactive branch only.
 - `custom_components/pv_optimizer/ev_controller.py` — probe constants, `should_probe_surplus`, `SurplusProbeDecision`, `decide_surplus_probe`.
 - `tests/test_ev_controller.py` — pure-logic tests.
 - `tests/test_planner.py` — wiring tests.
@@ -796,107 +796,11 @@ git commit -m "feat(ev): planner-driven surplus probe in reactive branch"
 
 ---
 
-## Task 7: Wire the probe into the planned-start gate
+## Task 7: Regression sweep — gate stays idle, probe is reactive-only
 
-**Files:**
-- Modify: `custom_components/pv_optimizer/planner.py`
-- Test: `tests/test_planner.py`
-
-- [ ] **Step 1: Write the failing test**
-
-Add to `tests/test_planner.py`:
-
-```python
-def test_probe_arms_in_planned_start_gate() -> None:
-    states = _probe_states()
-    # Future planned start + a target so the LP reserves a later window;
-    # slot 0 stays at p_ev_chg=0, exercising the gate.
-    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="5")
-    deadline = (NOW + timedelta(hours=3)).isoformat() + "+00:00"
-    states["datetime.pv_optimizer_ev_deadline"] = StateView(state=deadline)
-    planned_start = (NOW + timedelta(hours=2)).isoformat() + "+00:00"
-    states["datetime.pv_optimizer_ev_planned_start"] = StateView(state=planned_start)
-    p = Planner(_config(ev=_probe_ev_cfg(), battery_power_entity="sensor.batt_w"),
-                FakeReader(states), FakeCaller())
-    p.step(NOW)
-    mode_writes = [c for c in p.caller.calls if c[2].get("entity_id") == "select.ev_mode"]
-    current_writes = [c for c in p.caller.calls if c[2].get("entity_id") == "number.ev_max_current"]
-    assert mode_writes and mode_writes[-1][2]["option"] == "Manual"   # probe took over
-    assert current_writes and current_writes[-1][2]["value"] == 6
-    assert p.ev_state.probe_armed is True
-
-
-def test_planned_start_gate_without_battery_power_still_passive() -> None:
-    # Regression: existing gate behavior (passive handback) is preserved when
-    # the probe is not configured.
-    states = _probe_states()
-    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="5")
-    deadline = (NOW + timedelta(hours=3)).isoformat() + "+00:00"
-    states["datetime.pv_optimizer_ev_deadline"] = StateView(state=deadline)
-    planned_start = (NOW + timedelta(hours=2)).isoformat() + "+00:00"
-    states["datetime.pv_optimizer_ev_planned_start"] = StateView(state=planned_start)
-    p = Planner(_config(ev=_probe_ev_cfg()),  # no battery_power_entity
-                FakeReader(states), FakeCaller())
-    p.step(NOW)
-    mode_writes = [c for c in p.caller.calls if c[2].get("entity_id") == "select.ev_mode"]
-    assert mode_writes and mode_writes[-1][2]["option"] == "Auto"   # passive handback
-    assert p.ev_state.probe_armed is False
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `.venv/bin/python -m pytest tests/test_planner.py::test_probe_arms_in_planned_start_gate -q`
-Expected: FAIL — gate still writes "Auto" (passive handback), so the "Manual" assert fails.
-
-- [ ] **Step 3: Wire the probe into the gate**
-
-In `_apply_ev`, find the planned-start gate (around lines 737-746, as left by the prior change):
-
-```python
-        if mode == "auto":
-            planned_start = self._read_datetime_optional(
-                cfg.planned_start_entity)
-            if planned_start is not None and planned_start > now:
-                self._write_ev_charger_mode_passive()
-                self._write_ev_current(cfg.params.max_charging_current_a)
-                self._write_ev_start(True)
-                return
-```
-
-Replace the inner block so the probe is tried first, falling back to the passive handback:
-
-```python
-        if mode == "auto":
-            planned_start = self._read_datetime_optional(
-                cfg.planned_start_entity)
-            if planned_start is not None and planned_start > now:
-                if not self._run_surplus_probe(plan_first):
-                    self._write_ev_charger_mode_passive()
-                    self._write_ev_current(cfg.params.max_charging_current_a)
-                    self._write_ev_start(True)
-                return
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `.venv/bin/python -m pytest tests/test_planner.py -k "planned_start_gate or probe_arms_in_planned" -q`
-Expected: PASS.
-
-- [ ] **Step 5: Run full suite**
-
-Run: `.venv/bin/python -m pytest tests/ -q`
-Expected: PASS (the two pre-existing gate tests still pass — they configure no `battery_power_entity`, so the probe stays disabled and the passive handback runs unchanged).
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add custom_components/pv_optimizer/planner.py tests/test_planner.py
-git commit -m "feat(ev): planner-driven surplus probe in planned-start gate"
-```
-
----
-
-## Task 8: Regression sweep + manifest of behavior
+The planned-start gate is intentionally **not** wired to the probe (it
+deliberately keeps the charger idle before `planned_start`). This task just
+confirms nothing regressed.
 
 **Files:**
 - Test: `tests/` (whole suite)
@@ -906,24 +810,49 @@ git commit -m "feat(ev): planner-driven surplus probe in planned-start gate"
 Run: `.venv/bin/python -m pytest tests/ -q`
 Expected: PASS, output pristine (no warnings/errors).
 
-- [ ] **Step 2: Confirm the two prior gate tests assert the right (unchanged) behavior**
+- [ ] **Step 2: Confirm the planned-start gate tests are untouched and green**
 
-These pre-existing tests must still pass because they don't configure `battery_power_entity`:
-- `test_planner_planned_start_pre_schedules_window_in_auto`
-- `test_planner_planned_start_hands_connected_car_to_passive_surplus`
+Whatever planned-start gate tests currently exist in `tests/test_planner.py`
+must still pass without modification — the probe change does not touch the gate.
 
-Run: `.venv/bin/python -m pytest tests/test_planner.py -k "planned_start_pre_schedules or hands_connected_car_to_passive" -q`
+Run: `.venv/bin/python -m pytest tests/test_planner.py -k "planned_start" -q`
 Expected: PASS.
 
-- [ ] **Step 3: Lint/type check if the project has one**
+- [ ] **Step 3: Confirm the probe never arms inside the gate**
 
-Run: `.venv/bin/python -m pytest -q` is the gate; if the repo has a `ruff`/`mypy` config, run it (e.g. `.venv/bin/ruff check custom_components`). Otherwise skip.
+Sanity check that a future `planned_start` keeps the charger idle even with
+`battery_power_entity` configured (the gate returns before the reactive branch,
+so the probe is never reached). Add to `tests/test_planner.py`:
 
-- [ ] **Step 4: Final commit if anything changed**
+```python
+def test_probe_does_not_arm_inside_planned_start_gate() -> None:
+    states = _probe_states()
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="5")
+    deadline = (NOW + timedelta(hours=3)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_deadline"] = StateView(state=deadline)
+    planned_start = (NOW + timedelta(hours=2)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_planned_start"] = StateView(state=planned_start)
+    p = Planner(_config(ev=_probe_ev_cfg(), battery_power_entity="sensor.batt_w"),
+                FakeReader(states), FakeCaller())
+    p.step(NOW)
+    # Gate behavior (idle handback) wins; probe never armed.
+    assert p.ev_state.probe_armed is False
+    starts = [c for c in p.caller.calls if c[2].get("entity_id") == "switch.ev_start"]
+    assert starts and starts[-1][1] == "turn_off"
+```
+
+Run: `.venv/bin/python -m pytest tests/test_planner.py::test_probe_does_not_arm_inside_planned_start_gate -q`
+Expected: PASS (no code change needed — the gate already returns before the reactive branch).
+
+- [ ] **Step 4: Lint/type check if the project has one**
+
+If the repo has a `ruff`/`mypy` config, run it (e.g. `.venv/bin/ruff check custom_components`). Otherwise skip.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add -A
-git commit -m "test(ev): regression sweep for surplus probe" || echo "nothing to commit"
+git add tests/test_planner.py
+git commit -m "test(ev): assert probe stays out of the planned-start gate"
 ```
 
 ---
@@ -934,16 +863,18 @@ git commit -m "test(ev): regression sweep for surplus probe" || echo "nothing to
 - Asymmetric split (EVCS follows export) → arm predicate blocks on `p_sell > 0` (Task 3). ✓
 - Probe arms only in curtailment corner → `should_probe_surplus` (Task 3). ✓
 - Watch battery discharge (primary) + grid import (secondary) → `decide_surplus_probe` overshoot (Task 4); planner reads `battery_power_entity`, normalises `max(0, -batt)` (Task 6). ✓
-- Probe requires `battery_power_entity`; fail-safe to passive otherwise → Tasks 1, 6, 7 + regression Task 8. ✓
+- Probe requires `battery_power_entity`; fail-safe to passive otherwise → Tasks 1, 6 + regression Task 7. ✓
 - SoC hysteresis (arm vs disarm) → `currently_armed` branch (Task 3). ✓
 - Below-min → 0 → Task 4. ✓
 - Anti-oscillation (deadband + lazy/rate-limited up + forecast headroom) → Task 4. ✓
-- Disarm back to "Auto", reset state, no stickiness → Task 6 helper + reactive/gate fall-through. ✓
-- Wire both no-LP paths through one helper → Tasks 6, 7. ✓
+- Disarm back to "Auto", reset state, no stickiness → Task 6 helper + reactive fall-through. ✓
+- Wire the reactive branch only; gate left idle (per spec) → Task 6 + regression Task 7. ✓
 - Constants per spec (`PROBE_UP_INTERVAL_CYCLES=3`, `PROBE_IMPORT_CEILING_W=500`, `PROBE_DISCHARGE_CEILING_W=300`, `SOC_FULL_EPS_KWH=0.2`, `SOC_DISARM_EPS_KWH=0.5`, `PROBE_FORECAST_MARGIN_KW=0.5`) → Task 3. ✓
 - Cadence unchanged (existing cycle) → no scheduler change. ✓
 
-**Type consistency:** `should_probe_surplus` / `decide_surplus_probe` / `SurplusProbeDecision` signatures and `EVRuntimeState` field names (`probe_armed`, `probe_current_a`, `probe_cycles_since_up`) are used identically across Tasks 3–7. `_write_ev_current(value, *, force=False)` and `_run_surplus_probe(plan_first)` match their call sites.
+**Type consistency:** `should_probe_surplus` / `decide_surplus_probe` / `SurplusProbeDecision` signatures and `EVRuntimeState` field names (`probe_armed`, `probe_current_a`, `probe_cycles_since_up`) are used identically across Tasks 3–6. `_write_ev_current(value, *, force=False)` and `_run_surplus_probe(plan_first)` match their call sites.
+
+**Gate divergence note:** the spec originally listed the planned-start gate as a probe target; commit `fix(ev): don't surplus-charge before future planned-start` reversed that (gate stays idle by design), and both spec and plan were updated to scope the probe to the reactive branch only.
 
 **Placeholder scan:** none — every step shows concrete code/commands.
 
