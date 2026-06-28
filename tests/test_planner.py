@@ -2148,3 +2148,28 @@ def test_planner_caches_first_slot_pv_and_load() -> None:
     p.step(NOW)
     assert p._cached_first_pv_kw == pytest.approx(3.0, abs=1e-6)
     assert p._cached_first_load_kw == pytest.approx(1.0, abs=0.2)
+
+
+def test_write_ev_current_force_bypasses_tolerance() -> None:
+    from custom_components.pv_optimizer.planner import EVConfig
+    from custom_components.pv_optimizer.models import EVParams
+    ev_cfg = EVConfig(
+        params=EVParams(
+            max_charging_power_kw=7.2, max_charging_current_a=32.0,
+            min_charging_current_a=6.0, car_battery_kwh=60.0,
+            current_tolerance_a=1.0),
+        charger_state_entity="sensor.ev_state",
+        charging_power_entity="sensor.ev_power",
+        max_current_entity="number.ev_max_current",
+    )
+    p = Planner(_config(ev=ev_cfg), FakeReader(_states()), FakeCaller())
+    p.ev_state.last_written_current_a = 10
+    # 1 A delta is within tolerance -> suppressed without force.
+    p._write_ev_current(11)
+    assert not [c for c in p.caller.calls
+                if c[2].get("entity_id") == "number.ev_max_current"]
+    # force=True writes anyway.
+    p._write_ev_current(11, force=True)
+    writes = [c for c in p.caller.calls
+              if c[2].get("entity_id") == "number.ev_max_current"]
+    assert writes and writes[-1][2]["value"] == 11

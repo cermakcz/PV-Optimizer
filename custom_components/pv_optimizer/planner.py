@@ -70,6 +70,10 @@ class EVRuntimeState:
     session_energy_kwh: float = 0.0
     last_charging_power_kw: float | None = None
     last_tick: datetime | None = None
+    # Curtailed-surplus probe state.
+    probe_armed: bool = False
+    probe_current_a: int = 0
+    probe_cycles_since_up: int = 0
 
 
 @dataclass(frozen=True)
@@ -922,15 +926,16 @@ class Planner:
     def _first_slot_buy_price(self) -> float:
         return self._cached_first_buy_price
 
-    def _write_ev_current(self, value_a: float) -> None:
+    def _write_ev_current(self, value_a: float, *, force: bool = False) -> None:
         cfg = self.config.ev
         if cfg is None:
             return
         es = self.ev_state
         new_val = int(round(value_a))
-        if es and es.last_written_current_a is not None:
-            if abs(new_val - es.last_written_current_a) <= cfg.params.current_tolerance_a:
-                return  # within tolerance
+        if (not force and es and es.last_written_current_a is not None
+                and abs(new_val - es.last_written_current_a)
+                <= cfg.params.current_tolerance_a):
+            return  # within tolerance
         self.caller.call("number", "set_value", {
             "entity_id": cfg.max_current_entity, "value": new_val,
         })
