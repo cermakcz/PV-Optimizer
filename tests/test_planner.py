@@ -2115,3 +2115,12 @@ def test_ev_replan_trigger_entities_filters_empty() -> None:
     result = ev_replan_trigger_entities(ev_cfg)
     assert result == ["sensor.ev_state"]
     assert "sensor.ev_power" not in result
+
+
+def test_planner_config_accepts_battery_power_entity() -> None:
+    cfg = _config(battery_power_entity="sensor.batt_w")
+    assert cfg.battery_power_entity == "sensor.batt_w"
+
+
+def test_planner_config_battery_power_entity_defaults_none() -> None:
+    assert _config().battery_power_entity is None

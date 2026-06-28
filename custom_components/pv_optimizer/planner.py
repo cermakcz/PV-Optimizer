@@ -182,6 +182,7 @@ class PlannerConfig:
     load_forecast_entity: str | None = None
     feedin_override_entity: str | None = None
     force_pv_export_entity: str | None = None
+    battery_power_entity: str | None = None
     # Outputs (entity IDs).
     grid_setpoint_entity: str = ""
     feedin_switch_entity: str = ""
