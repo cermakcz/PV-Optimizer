@@ -378,6 +378,13 @@ class Planner:
             slot_starts.append(start)
 
         pv_kw = self._read_pv_forecast(cfg.pv_forecast_entity, slot_starts, slot_h)
+        # Cache the raw (pre-clamp) slot-0 forecast for the surplus probe. The
+        # probe's arm condition must use the forecast before any live-average
+        # clamp: under curtailment (battery full, export disabled) the inverter
+        # clips measured PV to ~load, so the live average ≈ load and
+        # min(forecast, live) would drive forecast_surplus to ~0 — exactly when
+        # the probe should fire. The LP still uses the clamped pv_kw[0].
+        self._cached_first_pv_kw = pv_kw[0] if pv_kw else 0.0
         ti2 = _time.perf_counter()
         # Refine slot-0 PV against a measured trailing average so the active
         # force-export branch responds to clouds within one planner cycle.
@@ -403,7 +410,6 @@ class Planner:
         )
 
         self._cached_first_buy_price = slots[0].price_buy
-        self._cached_first_pv_kw = pv_kw[0] if pv_kw else 0.0
         self._cached_first_load_kw = load_kw[0] if load_kw else 0.0
 
         # EV inputs (only when an EV config exists, the user has set a

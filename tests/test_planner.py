@@ -2293,3 +2293,20 @@ def test_probe_does_not_arm_inside_planned_start_gate() -> None:
     assert p.ev_state.probe_armed is False
     starts = [c for c in p.caller.calls if c[2].get("entity_id") == "switch.ev_start"]
     assert starts and starts[-1][1] == "turn_off"
+
+
+def test_probe_arms_despite_clipped_live_pv() -> None:
+    # Curtailment: the live PV reading is itself clipped to ~load (1 kW) while
+    # the raw forecast is 4 kW. The probe must arm off the RAW forecast — if it
+    # used the live-clamped value, forecast_surplus would be ~0 and it would go
+    # blind exactly when curtailment happens.
+    class _ClippedAverager:
+        def average_kw(self, entity_id, start, end):
+            return 1.0  # clipped to ~load
+
+    states = _probe_states()
+    p = Planner(_config(ev=_probe_ev_cfg(), battery_power_entity="sensor.batt_w"),
+                FakeReader(states), FakeCaller(), live_averager=_ClippedAverager())
+    p.step(NOW)
+    assert p._cached_first_pv_kw == pytest.approx(4.0, abs=1e-6)  # raw, not clamped
+    assert p.ev_state.probe_armed is True
