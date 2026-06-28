@@ -102,7 +102,12 @@ hold:
   surplus, so there is nothing being curtailed.
 - PV forecast for the slot exceeds live load by a margin (`pv_forecast > load +
   PROBE_FORECAST_MARGIN_KW`) — a reason to believe surplus exists, so we never
-  kick the charger awake on a dark/cloudy clamp.
+  kick the charger awake on a dark/cloudy clamp. This uses the **raw** upstream
+  forecast, captured *before* the slot-0 `min(forecast, live_average)` clamp:
+  under curtailment the live PV reading is itself clipped to ≈ load, so the
+  clamped value would zero the probe's headroom and blind it exactly when it's
+  needed. An over-optimistic forecast is harmless — the probe kicks to min
+  current and the battery-discharge overshoot check immediately backs it off.
 - Car connected: `classify_state(charger_state) != DISCONNECTED`.
 - A battery-power signal is available. The probe **requires** `battery_power_entity`
   (see "Detecting overshoot" below); if it is unconfigured, or its reading or
