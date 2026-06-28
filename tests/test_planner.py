@@ -2277,3 +2277,19 @@ def test_probe_steps_to_zero_and_stops_on_overshoot() -> None:
     assert starts and starts[-1][1] == "turn_off"
     assert p.ev_state.probe_current_a == 0
     assert p.ev_state.probe_armed is True   # still armed, just not charging
+
+
+def test_probe_does_not_arm_inside_planned_start_gate() -> None:
+    states = _probe_states()
+    states["number.pv_optimizer_ev_target_kwh"] = StateView(state="5")
+    deadline = (NOW + timedelta(hours=3)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_deadline"] = StateView(state=deadline)
+    planned_start = (NOW + timedelta(hours=2)).isoformat() + "+00:00"
+    states["datetime.pv_optimizer_ev_planned_start"] = StateView(state=planned_start)
+    p = Planner(_config(ev=_probe_ev_cfg(), battery_power_entity="sensor.batt_w"),
+                FakeReader(states), FakeCaller())
+    p.step(NOW)
+    # Gate behavior (idle handback) wins; probe never armed.
+    assert p.ev_state.probe_armed is False
+    starts = [c for c in p.caller.calls if c[2].get("entity_id") == "switch.ev_start"]
+    assert starts and starts[-1][1] == "turn_off"
