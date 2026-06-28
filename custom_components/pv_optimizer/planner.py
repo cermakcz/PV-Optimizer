@@ -904,8 +904,9 @@ class Planner:
 
     def _run_surplus_probe(self, plan_first) -> bool:
         """If conditions warrant, take over surplus charging from the EVCS and
-        return True (writes Manual + regulated current + start). Otherwise reset
-        any probe state and return False so the caller's passive handback runs.
+        return True (writes active charger mode if a charger_mode_entity is
+        configured, regulated current, and start). Otherwise reset any probe
+        state and return False so the caller's reactive path runs.
         """
         cfg = self.config.ev
         es = self.ev_state
