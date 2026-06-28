@@ -76,6 +76,51 @@ def classify_state(
     return EVStateClass.CONNECTED_IDLE  # conservative fallback
 
 
+# --- Curtailed-surplus probe (see specs/2026-06-23-ev-curtailed-surplus-probe) ---
+# All tunable; initial values to validate empirically.
+SOC_FULL_EPS_KWH = 0.2        # how close to soc_max counts as "full" (arm)
+SOC_DISARM_EPS_KWH = 0.5      # wider margin to stay armed (avoid self-disarm)
+PROBE_FORECAST_MARGIN_KW = 0.5  # forecast surplus must exceed this to arm
+PROBE_DISCHARGE_CEILING_W = 300.0  # step down above this battery discharge
+PROBE_IMPORT_CEILING_W = 500.0     # step down above this grid import
+PROBE_UP_INTERVAL_CYCLES = 3       # min cycles between speculative up-steps
+
+
+def should_probe_surplus(
+    *,
+    currently_armed: bool,
+    state_class: EVStateClass,
+    p_ev_chg_kw: float,
+    p_sell_kw: float,
+    soc_kwh: float,
+    soc_max_kwh: float,
+    forecast_surplus_kw: float,
+    battery_power_available: bool,
+    grid_available: bool,
+    eps: float = 1e-6,
+) -> bool:
+    """True iff the planner should take over surplus charging from the EVCS.
+
+    Arms only in the curtailment corner: battery full, no LP-planned EV charge,
+    not exporting (so the EVCS's export-follower would be blind), forecast says
+    surplus exists, car connected, and both signal sources are available.
+    Uses a wider SoC margin while already armed so the probe's own brief
+    overshoot-dip can't disarm it.
+    """
+    if not (battery_power_available and grid_available):
+        return False
+    if state_class == EVStateClass.DISCONNECTED:
+        return False
+    if p_ev_chg_kw > eps or p_sell_kw > eps:
+        return False
+    soc_eps = SOC_DISARM_EPS_KWH if currently_armed else SOC_FULL_EPS_KWH
+    if soc_kwh < soc_max_kwh - soc_eps:
+        return False
+    if forecast_surplus_kw <= PROBE_FORECAST_MARGIN_KW:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class ReactiveDecision:
     """Decision output for one planner tick (reactive branch)."""

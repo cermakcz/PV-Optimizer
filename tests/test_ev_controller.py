@@ -7,6 +7,9 @@ from custom_components.pv_optimizer.ev_controller import (
     EVStateClass,
     classify_state,
     DEFAULT_STATE_VOCAB,
+    should_probe_surplus,
+    SOC_FULL_EPS_KWH,
+    SOC_DISARM_EPS_KWH,
 )
 
 
@@ -430,3 +433,64 @@ def test_car_auto_return_switch_class_shape() -> None:
         for k in _inserted:
             sys.modules.pop(k, None)
         sys.modules.pop("custom_components.pv_optimizer.switch", None)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: should_probe_surplus
+# ---------------------------------------------------------------------------
+
+
+def _arm_kwargs(**over):
+    base = dict(
+        currently_armed=False,
+        state_class=EVStateClass.CONNECTED_IDLE,
+        p_ev_chg_kw=0.0,
+        p_sell_kw=0.0,
+        soc_kwh=9.0,
+        soc_max_kwh=9.0,
+        forecast_surplus_kw=2.0,
+        battery_power_available=True,
+        grid_available=True,
+    )
+    base.update(over)
+    return base
+
+
+def test_should_probe_arms_in_curtailment_corner() -> None:
+    assert should_probe_surplus(**_arm_kwargs()) is True
+
+
+def test_should_probe_blocks_without_battery_power() -> None:
+    assert should_probe_surplus(**_arm_kwargs(battery_power_available=False)) is False
+
+
+def test_should_probe_blocks_without_grid() -> None:
+    assert should_probe_surplus(**_arm_kwargs(grid_available=False)) is False
+
+
+def test_should_probe_blocks_when_disconnected() -> None:
+    assert should_probe_surplus(
+        **_arm_kwargs(state_class=EVStateClass.DISCONNECTED)) is False
+
+
+def test_should_probe_blocks_when_lp_charges() -> None:
+    assert should_probe_surplus(**_arm_kwargs(p_ev_chg_kw=2.0)) is False
+
+
+def test_should_probe_blocks_when_exporting() -> None:
+    assert should_probe_surplus(**_arm_kwargs(p_sell_kw=1.0)) is False
+
+
+def test_should_probe_blocks_when_battery_not_full() -> None:
+    # 9.0 - 0.2 (SOC_FULL_EPS) = 8.8 is the arm floor; 8.5 is below it.
+    assert should_probe_surplus(**_arm_kwargs(soc_kwh=8.5)) is False
+
+
+def test_should_probe_blocks_without_forecast_surplus() -> None:
+    assert should_probe_surplus(**_arm_kwargs(forecast_surplus_kw=0.1)) is False
+
+
+def test_should_probe_disarm_uses_wider_soc_margin() -> None:
+    # soc 8.6: below arm floor (8.8) but above disarm floor (9.0-0.5=8.5).
+    assert should_probe_surplus(**_arm_kwargs(soc_kwh=8.6, currently_armed=False)) is False
+    assert should_probe_surplus(**_arm_kwargs(soc_kwh=8.6, currently_armed=True)) is True
