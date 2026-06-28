@@ -122,6 +122,57 @@ def should_probe_surplus(
 
 
 @dataclass(frozen=True)
+class SurplusProbeDecision:
+    """One regulator step: next commanded current and updated up-counter."""
+
+    current_a: int           # integer A; 0 disables charging
+    cycles_since_up: int
+
+
+def decide_surplus_probe(
+    *,
+    battery_discharge_w: float,
+    grid_import_w: float,
+    forecast_surplus_kw: float,
+    current_a: int,
+    cycles_since_up: int,
+    ev,  # EVParams
+) -> SurplusProbeDecision:
+    """Zero-import regulator step (see spec §"Control law").
+
+    Down (responsive): on battery discharge or grid import past the ceilings,
+    step down one amp immediately (below min -> 0). Up (speculative, lazy): at
+    most one amp every PROBE_UP_INTERVAL_CYCLES, only while not overshooting,
+    below max, and the next amp still fits the forecast surplus headroom.
+    Otherwise hold and advance the up-counter.
+    """
+    min_a = int(round(ev.min_charging_current_a))
+    max_a = int(round(ev.max_charging_current_a))
+
+    overshoot = (battery_discharge_w > PROBE_DISCHARGE_CEILING_W
+                 or grid_import_w > PROBE_IMPORT_CEILING_W)
+    if overshoot:
+        new_a = current_a - 1
+        if new_a < min_a:
+            return SurplusProbeDecision(current_a=0, cycles_since_up=0)
+        return SurplusProbeDecision(current_a=new_a, cycles_since_up=0)
+
+    if current_a < min_a:
+        # Not charging yet — kick to min as the first probe.
+        return SurplusProbeDecision(current_a=min_a, cycles_since_up=0)
+
+    can_step_up = (
+        current_a < max_a
+        and cycles_since_up + 1 >= PROBE_UP_INTERVAL_CYCLES
+        and (current_a + 1) * ev.kw_per_amp <= forecast_surplus_kw
+    )
+    if can_step_up:
+        return SurplusProbeDecision(current_a=current_a + 1, cycles_since_up=0)
+    return SurplusProbeDecision(current_a=current_a,
+                                cycles_since_up=cycles_since_up + 1)
+
+
+@dataclass(frozen=True)
 class ReactiveDecision:
     """Decision output for one planner tick (reactive branch)."""
 

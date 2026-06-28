@@ -10,6 +10,8 @@ from custom_components.pv_optimizer.ev_controller import (
     should_probe_surplus,
     SOC_FULL_EPS_KWH,
     SOC_DISARM_EPS_KWH,
+    decide_surplus_probe,
+    PROBE_UP_INTERVAL_CYCLES,
 )
 
 
@@ -494,3 +496,76 @@ def test_should_probe_disarm_uses_wider_soc_margin() -> None:
     # soc 8.6: below arm floor (8.8) but above disarm floor (9.0-0.5=8.5).
     assert should_probe_surplus(**_arm_kwargs(soc_kwh=8.6, currently_armed=False)) is False
     assert should_probe_surplus(**_arm_kwargs(soc_kwh=8.6, currently_armed=True)) is True
+
+
+# ---------------------------------------------------------------------------
+# Task 4: decide_surplus_probe
+# ---------------------------------------------------------------------------
+
+# 7.2 kW / 32 A => 0.225 kW/A; min 6 A, max 32 A.
+_PROBE_EV = EVParams(
+    max_charging_power_kw=7.2, max_charging_current_a=32.0,
+    min_charging_current_a=6.0, car_battery_kwh=60.0,
+)
+
+
+def _probe(**over):
+    base = dict(
+        battery_discharge_w=0.0,
+        grid_import_w=0.0,
+        forecast_surplus_kw=10.0,
+        current_a=0,
+        cycles_since_up=0,
+        ev=_PROBE_EV,
+    )
+    base.update(over)
+    return decide_surplus_probe(**base)
+
+
+def test_probe_kicks_to_min_when_not_charging() -> None:
+    d = _probe(current_a=0)
+    assert d.current_a == 6
+    assert d.cycles_since_up == 0
+
+
+def test_probe_steps_down_on_battery_discharge() -> None:
+    d = _probe(current_a=10, battery_discharge_w=500.0)
+    assert d.current_a == 9
+    assert d.cycles_since_up == 0
+
+
+def test_probe_steps_down_on_grid_import() -> None:
+    d = _probe(current_a=10, grid_import_w=800.0)
+    assert d.current_a == 9
+
+
+def test_probe_below_min_goes_to_zero() -> None:
+    d = _probe(current_a=6, battery_discharge_w=500.0)
+    assert d.current_a == 0
+
+
+def test_probe_holds_inside_deadband() -> None:
+    # No overshoot, interval not yet reached -> hold, count up.
+    d = _probe(current_a=10, cycles_since_up=0)
+    assert d.current_a == 10
+    assert d.cycles_since_up == 1
+
+
+def test_probe_steps_up_after_interval() -> None:
+    d = _probe(current_a=10, cycles_since_up=PROBE_UP_INTERVAL_CYCLES - 1)
+    assert d.current_a == 11
+    assert d.cycles_since_up == 0
+
+
+def test_probe_up_gated_by_forecast_headroom() -> None:
+    # current 10 A -> 11 A needs 11*0.225 = 2.475 kW. Forecast surplus 2.0 kW
+    # is below that, so no up-step even though the interval elapsed.
+    d = _probe(current_a=10, cycles_since_up=PROBE_UP_INTERVAL_CYCLES - 1,
+               forecast_surplus_kw=2.0)
+    assert d.current_a == 10
+    assert d.cycles_since_up == PROBE_UP_INTERVAL_CYCLES
+
+
+def test_probe_does_not_exceed_max() -> None:
+    d = _probe(current_a=32, cycles_since_up=PROBE_UP_INTERVAL_CYCLES - 1)
+    assert d.current_a == 32
