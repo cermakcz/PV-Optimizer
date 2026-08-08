@@ -35,6 +35,9 @@ At every update tick the integration:
    energy between battery and grid; in passive slots it stays at 0 and the
    inverter handles self-consumption itself (see *Active vs passive control*
    below).
+5. Optionally drives an **EV wall-box** — either scheduled inside the same LP
+   against a charge target and deadline, or reactively from PV surplus and
+   cheap grid hours (see *EV charging* below). Entirely opt-in.
 
 The optimizer is a pure Python module (`optimizer.py`) with no Home Assistant
 imports, fully covered by unit tests.
@@ -46,17 +49,27 @@ custom_components/pv_optimizer/
   optimizer.py         # LP formulation + solve()
   planner.py           # Pure read→solve→apply pipeline (testable, no HA)
   load_forecaster.py   # Median-over-N-days load forecaster (testable, no HA)
+  ev_controller.py     # Pure EV decision logic: state classification,
+                       #   reactive charging, curtailed-surplus probe
   coordinator.py       # HA DataUpdateCoordinator shim around Planner
   config_flow.py       # Multi-step UI configuration
   sensor.py            # Diagnostic sensors
+  select.py            # EV mode select        (auto / car / off)
+  number.py            # EV target kWh / %
+  datetime.py          # EV deadline / planned start
+  switch.py            # EV car-mode auto-return
   const.py             # Configuration keys + defaults
   manifest.json        # HA manifest
 tests/
   test_optimizer.py
   test_planner.py
   test_load_forecaster.py
+  test_ev_controller.py
 PRD.md
 ```
+
+The four EV control platforms (`select`/`number`/`datetime`/`switch`) only
+publish entities when the EV feature is configured.
 
 ## Installation
 1. Copy `custom_components/pv_optimizer/` into your Home Assistant
@@ -68,19 +81,21 @@ PRD.md
 Useful charts are in the [dashboards](/dashboards) directory.
 
 ## Configuration
-Four steps in the UI:
+Five steps in the UI:
 
 | Step | What you provide |
 |---|---|
-| Entities | Sensor IDs for load, PV, grid, SoC, buy/sell prices (today + optional tomorrow), PV forecast, optional load forecast, optional feed-in override, optional **force-PV-export** toggle; plus the `number` for the Victron grid set-point and the `switch` controlling feed-in. |
+| Entities | Sensor IDs for load, PV, grid, SoC, buy/sell prices (today + optional tomorrow), PV forecast, optional load forecast, optional **battery power** (signed; needed by the EV surplus probe), optional feed-in override, optional **force-PV-export** toggle; plus the `number` for the Victron grid set-point and the `switch` controlling feed-in. |
 | Battery  | Usable capacity (kWh), SoC min/max %, max charge/discharge power (kW), round-trip efficiencies, **cycle cost in your currency / kWh delivered out of the battery** — LCOS convention, booked on the discharge leg (≈ `battery_price / (cycles × usable_kWh × η_rt)`), optional **soft SoC health floor (%)** and **low-SoC dwell penalty (currency / kWh / h)** — see *Soft SoC health floor* below. |
 | Solver   | Slot length (default 60 min), horizon (default 24 h), update interval (default 5 min), max grid import/export (kW), set-point write tolerance (W), **minimum sell price (currency/kWh; default 0)** — see *Minimum sell price* below. |
 | Load forecast | Lookback days (default 7), optional cap (kW; 0 = no cap), weekday-aware mode (default off). Skipped at runtime when an external `load_forecast_entity` was set in the Entities step. |
+| EV charging | All optional — leave blank to disable the feature entirely. Charger entity IDs (state, charging power, optional session energy, max-current `number`, optional start `switch`, optional native-mode entity + its *active* / *passive* option strings) and the static parameters (max charging power kW, max charging current A, min current A, cheap-grid price threshold, car battery kWh, current write tolerance, session-done power/duration). See *EV charging* below. |
 
-Options flow re-exposes the **Battery + Solver + Load-forecast** knobs and entities in a
-single combined screen (pre-filled with current values), so cycle cost,
-efficiencies, horizon, etc. can be tuned after install without re-adding the
-integration.
+Options flow re-exposes **every** knob — entities, battery, solver,
+load-forecast and EV — in a single combined screen (pre-filled with current
+values), so cycle cost, efficiencies, horizon, etc. can be tuned after install
+without re-adding the integration. It is also how you switch the EV feature on
+for an existing install.
 
 > Currency note: the planner is currency-agnostic. All price-related fields
 > (cycle cost in config, the cost / savings diagnostic sensors) carry the
@@ -244,6 +259,142 @@ Always-on, no toggle — when the predicate doesn't fire (e.g. battery
 already at the hard floor with no arbitrage to defend) the forced
 positive set-point produces the same physical behaviour as `0`.
 
+## EV charging
+Optional and brand-agnostic — the integration talks to your wall-box through
+whatever HA entities it already exposes, with no charger-specific code. Fill in
+the **EV charging** config step to enable it; leave it blank and nothing below
+exists (no entities, no LP variables, no writes).
+
+The feature turns on only when all six of these are set: charger-state entity,
+charging-power entity, max-current `number`, max charging power (kW), max
+charging current (A), and car battery capacity (kWh). The power/current pair is
+the only place phases and voltage enter the picture — everything downstream
+uses the derived ratio `kw_per_amp = max_power_kw / max_current_a`.
+
+### Entities you get
+| Entity | What it's for |
+|---|---|
+| `select.pv_optimizer_ev_mode` | `auto` / `car` / `off`. Default `auto`. |
+| `number.pv_optimizer_ev_target_kwh` | How much to put in the car this session. |
+| `number.pv_optimizer_ev_target_pct` | Same target as a % of the car's battery. Set either one — the planner uses whichever implies more kWh, so you never have to clear the other. |
+| `datetime.pv_optimizer_ev_deadline` | "Have it done by." Required for LP-planned charging. |
+| `datetime.pv_optimizer_ev_planned_start` | Optional "I'll be plugged in by." |
+| `switch.pv_optimizer_ev_car_auto_return` | Opt-in auto-exit from `car` mode. Default off. |
+
+All of them survive a restart. The target is **not** reset between sessions —
+it stays until you change it.
+
+### The three modes
+**`auto`** — the useful one. If you've set a target **and** a future deadline
+and the car is connected, EV charging becomes a variable in the LP and gets
+scheduled into the cheapest hours before the deadline, co-optimized against
+the house battery, PV and prices. Without a target (or once it's met, or once
+the deadline has passed) it falls back to reactive charging: max current
+whenever the buy price is at or below your cheap-grid threshold, otherwise
+surplus-follow. Notably `auto` ignores the car's own "I want power" signal —
+that request is what `car` mode is for.
+
+**`car`** — "just charge it, now." Writes max current + start every tick and
+ignores the plan. **Sticky**: it stays there until you switch back, which is
+usually what you want at 11pm on a Sunday. Turn on the auto-return switch if
+you'd rather have it drop back to `auto` when the session finishes.
+
+**`off`** — the planner writes nothing to the charger at all. Sensors keep
+updating, so you can watch without the integration touching anything.
+
+### Planned start
+Set a future **planned start** and the planner pretends the car will be
+plugged in by then: it reserves the LP window from that time onwards, so you
+can schedule a charging block before you're home. Until that time it drives no
+charging at all — *not even from free PV surplus*. That's deliberate: if you
+scheduled a later start you probably had a reason (cheaper or negative prices
+tonight), and topping up from solar now could be the wrong trade. `car` mode
+overrides the gate — explicit intent beats a schedule.
+
+### Deadline you can't hit
+The LP degrades gracefully rather than failing: if the charger physically
+cannot deliver the target before the deadline, it charges as much as it can
+and reports the shortfall in `sensor.pv_optimizer_ev_deficit_kwh`. Watch that
+sensor — a non-zero value is the integration telling you the deadline was
+never achievable.
+
+### Charger state vocabulary
+The charger's state string is matched case-insensitively against substrings,
+in the precedence order disconnected → requesting → idle:
+
+| Class | Matches |
+|---|---|
+| Disconnected | `disconnect`, `unplug` — plus `unknown` / `unavailable` / empty |
+| Requesting | `charging`, `waiting_for_sun`, `waiting_for_start`, `waiting_for_rfid`, `waiting_for_time`, `wait sun`, `wait_sun`, `wait time`, `wait start`, `wait rfid` |
+| Idle | `charged`, `connect`, `low_soc` |
+
+Anything unrecognised is treated as *connected but idle*, the conservative
+answer. Two deliberate choices: a bare `idle` is **not** treated as
+disconnected (several firmwares spell connected-not-charging as
+`charging_idle` / `connected_idle`), and `low_soc` — the charger pausing
+because your *home* battery is low — counts as idle, so the charger's own
+home-battery protection is respected.
+
+### Native charger mode (recommended)
+If you point **charger mode entity** at your wall-box's own mode `select`
+(and set the option strings — defaults are EVCS's `Manual` / `Auto`), the
+integration hands surplus tracking back to the charger whenever the charger
+can see the surplus itself, and only takes the wheel when it needs to. That's
+the better split: your charger's solar logic is usually good, and it runs far
+more often than the 5-minute planner tick.
+
+Without a mode entity the planner assumes the charger is permanently in
+manual/active mode and does the surplus math itself:
+
+```
+surplus_kw = max(0, (−grid_w + ev_charging_w) / 1000)
+current_a  = trunc(surplus_kw / kw_per_amp)     # 0 if below min current
+```
+
+The `+ ev_charging_w` term back-adds what the car is already drawing, without
+which the loop would read its own consumption as "no surplus" and ramp itself
+to zero. The result is truncated rather than rounded so the last fraction of
+an amp never comes from the grid.
+
+### Charging from curtailed solar
+There's a corner where *nobody* can see the free energy. Sun is strong, the
+house battery is full, and the sell price is under your **minimum sell price**
+floor — so the planner has disabled export. The inverter therefore clips
+production to match house load, grid power sits at zero, and your charger,
+which detects surplus by watching grid *export*, concludes there's nothing
+there and idles. Free solar gets thrown away.
+
+The planner's own PV sensor is blind here too: a clipping inverter reports the
+clipped figure, not the potential. So the surplus can't be measured — it has
+to be **discovered**, by pushing load and watching what the grid does.
+
+When the planner detects exactly that corner (battery full, export disabled,
+car connected, forecast says surplus exists, LP not already charging) it takes
+over the charger and runs a slow zero-import regulator: nudge the current up
+one amp at a time, and back off the instant the house battery starts
+discharging or the grid starts importing. It rests one amp *below* the true
+surplus on purpose — leaving a fraction of an amp of free solar unused is the
+cheap mistake; paying for grid is not.
+
+This needs the optional **battery power** entity (signed, negative =
+discharging) wired up in the Entities step. Without it the probe stays off
+entirely, because a full battery still discharges: watching grid import alone
+would let the planner quietly drain your house battery into the car at
+round-trip loss. Battery discharge is the early warning; grid import is the
+late one.
+
+As soon as the sell price recovers and export re-enables, the planner hands
+the charger back — your charger can see the export again, so it's the better
+controller from that point on.
+
+### Response time
+The planner normally runs on its fixed update interval (default 5 min), but
+waiting that long after plugging in would be annoying. So it also watches the
+charger state, target kWh/%, deadline, planned start and mode, and re-plans
+within a second or two of any of them changing. Charging power is deliberately
+**not** watched — normal wattage wobble would trigger an LP solve every few
+seconds.
+
 ## Diagnostic sensors
 Up to six sensors are created so the plan is visible in HA dashboards:
 
@@ -256,11 +407,21 @@ Up to six sensors are created so the plan is visible in HA dashboards:
 | `sensor.pv_optimizer_plan`                  | State = next-slot set-point in kW; per-slot plan + battery params in attributes (see below). |
 | `sensor.pv_optimizer_load_forecast`         | Built-in load forecaster's next-slot kW; full `kw_per_slot` and `days_used_per_slot` in attributes. Only created when the built-in forecaster is active (no `load_forecast_entity` configured). |
 
+Five more appear when the EV feature is configured:
+
+| Entity | Meaning |
+|---|---|
+| `sensor.pv_optimizer_ev_status` | `disconnected`, `off`, `car_mode`, `charging_lp_planned`, `charging_cheap_grid`, `charging_surplus`, or `idle` — what the integration thinks it's doing right now. |
+| `sensor.pv_optimizer_ev_session_energy` | kWh delivered since plug-in — your session-energy entity if you wired one, otherwise the planner's own integration of charging power. Reads from the same place the LP does, so the two can't disagree. Reports `0` while the car is unplugged, since many chargers hold the last session's total until the next plug-in. |
+| `sensor.pv_optimizer_ev_remaining_kwh` | Target minus what's been delivered — what the LP is still trying to schedule. |
+| `sensor.pv_optimizer_ev_planned_current` | Last max-current value written to the charger (A). |
+| `sensor.pv_optimizer_ev_deficit_kwh` | Energy the LP couldn't fit before the deadline. **Non-zero means the deadline isn't achievable** — the plan degrades instead of erroring, so this is where you find out. |
+
 `sensor.pv_optimizer_plan` attributes:
 
 | Attribute | Meaning |
 |---|---|
-| `slots` | Per-slot list with ISO-tagged `start`, `duration_h`, `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `soc_start_kwh`, `soc_physical_kwh`, `setpoint_w`. |
+| `slots` | Per-slot list with ISO-tagged `start`, `duration_h`, `p_buy_kw`, `p_sell_kw`, `p_chg_kw`, `p_dis_kw`, `p_ev_chg_kw`, `soc_start_kwh`, `soc_physical_kwh`, `setpoint_w`. `p_ev_chg_kw` is the LP's planned EV charging power (always `0` when the EV feature is off), so EV power charts as part of the same plan series. |
 | `capacity_kwh`, `soc_min_kwh`, `soc_max_kwh`, `soc_health_kwh` | Battery params, exposed so dashboards can compute SoC % and draw reserve / ceiling / health-floor lines without hardcoding. |
 | `low_soc_penalty_per_kwh_h` | Active dwell-penalty rate (currency/(kWh·h); `0` = disabled). |
 | `force_pv_export_enabled` | Mirrors the toggle's last-read value (`null` if unset, `true`/`false` otherwise). |
@@ -299,9 +460,18 @@ Assistant. It covers:
 - the median-over-N-days load forecaster in `tests/test_load_forecaster.py`,
   including spike rejection, partial-history fallback, time-weighted bucket
   averaging, weekday filtering, and result caching.
+- the pure EV decision logic in `tests/test_ev_controller.py` — charger-state
+  classification (including the `idle` and `low_soc` corner cases and custom
+  vocabularies), reactive surplus tracking, session-done detection, LP slot-0
+  translation, and the curtailed-surplus probe's arm matrix and regulator.
+  EV behaviour that spans layers lives in the other two suites: LP scheduling,
+  deadline cut-off and the soft deficit in `test_optimizer.py`; the mode
+  surface, planned-start gate, re-plan triggers and probe wiring in
+  `test_planner.py`.
 
-The HA-side files (`coordinator.py`, `config_flow.py`, `sensor.py`) are
-deliberately thin shims over the pure layer; they are exercised inside a
+The HA-side files (`coordinator.py`, `config_flow.py`, `sensor.py`, and the
+EV control platforms `select.py` / `number.py` / `datetime.py` / `switch.py`)
+are deliberately thin shims over the pure layer; they are exercised inside a
 running HA instance, not in this repository's CI.
 
 ## License
